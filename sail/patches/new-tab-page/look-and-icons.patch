@@ -1,0 +1,1674 @@
+Sail: a "Page style" card in the Customize panel (the pencil on the New Tab
+page): shortcut size, frosted glass behind the icons, shortcut names, a clock
+with a greeting, and how dark and blurred the wallpaper is. In a shortcut's
+Edit dialog you can also give it your own icon. Both are stored as JSON in
+two profile prefs (chrome/browser/ui/sail/sail_ntp_prefs.h), which the
+browser only passes between the panel and the page.
+
+Shortcuts also show the large icon their site declares (apple-touch-icon,
+or the largest icon of 96 px or more; Google's product icons for its apps)
+instead of a blown-up favicon. The browser reads the page without cookies to
+find it, chrome://image downloads and decodes it in a sandboxed process, and
+the page remembers the result for a week.
+
+The shortcuts' hover lifts the icon instead of lighting up the tile, their
+menu button sits on the icon's corner and shows at once, and the Edit /
+Remove menu and the add / edit dialog (with the icon on top, like editing
+an app) are restyled.
+
+--- /dev/null
++++ b/chrome/browser/ui/sail/sail_ntp_prefs.h
+@@ -0,0 +1,21 @@
++// Copyright 2026 The Sail Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_SAIL_SAIL_NTP_PREFS_H_
++#define CHROME_BROWSER_UI_SAIL_SAIL_NTP_PREFS_H_
++
++namespace sail::prefs {
++
++// The look of the New Tab page, set from the Customize panel: a JSON object
++// (shortcut size, glass, titles, clock, wallpaper dim and blur). The pages
++// read and write it as a whole; the browser only stores it.
++inline constexpr char kNtpLook[] = "sail.ntp.look";
++
++// The shortcuts' own icons: a JSON object from the shortcut's URL to a
++// data: URL of the image.
++inline constexpr char kNtpIcons[] = "sail.ntp.icons";
++
++}  // namespace sail::prefs
++
++#endif  // CHROME_BROWSER_UI_SAIL_SAIL_NTP_PREFS_H_
+--- a/chrome/browser/ui/webui/new_tab_page/new_tab_page.mojom
++++ b/chrome/browser/ui/webui/new_tab_page/new_tab_page.mojom
+@@ -207,6 +207,15 @@
+   UpdateActionChipsVisibility();
+   // Triggers a call to |FooterVisibilityUpdated|.
+   UpdateFooterVisibility();
++  // Sail: the look of the page and the shortcuts' own icons, both as JSON
++  // (see chrome/browser/ui/sail/sail_ntp_prefs.h).
++  GetSailLook() => (string look, string icons);
++  // Sail: stores the shortcuts' own icons.
++  SetSailIcons(string icons);
++  // Sail: finds a large icon for |page_url|: the apple-touch-icon or the
++  // largest icon the page declares. |full_bleed| is true for app icons,
++  // which are meant to fill their square. |icon_url| is empty if none.
++  FindSailIcon(url.mojom.Url page_url) => (string icon_url, bool full_bleed);
+   // Increments count of times the compose button was shown.
+   IncrementComposeButtonShownCount();
+   // Opens Customize Chrome if eligibility conditions are met.
+@@ -265,6 +274,8 @@
+   SetWallpaperSearchButtonVisibility(bool visible);
+   // Called when the NTP footer is shown or hidden.
+   FooterVisibilityUpdated(bool visible);
++  // Sail: called when the look of the page or the shortcuts' icons change.
++  SetSailLook(string look, string icons);
+   // Called when the embedded chrome-untrusted:// document wants to bind Mojo
+   // interfaces for communicating with the chrome:// document.
+   ConnectToParentDocument(pending_remote<MicrosoftAuthUntrustedDocument> child_untrusted_document_remote);
+--- a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.h
++++ b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.h
+@@ -134,6 +134,10 @@
+                           bool is_user_action) override;
+   void UpdateDisabledModules() override;
+   void UpdateFooterVisibility() override;
++  void GetSailLook(GetSailLookCallback callback) override;
++  void SetSailIcons(const std::string& icons) override;
++  void FindSailIcon(const GURL& page_url,
++                    FindSailIconCallback callback) override;
+   void OnModulesLoadedWithData(
+       const std::vector<std::string>& module_ids) override;
+   void OnModuleUsed(const std::string& module_id) override;
+@@ -198,6 +202,9 @@
+                                   std::optional<std::string> body)>
+       OnFetchResultCallback;
+   void Fetch(const GURL& url, OnFetchResultCallback on_result);
++  void OnSailPageLoaded(const network::SimpleURLLoader* loader,
++                        FindSailIconCallback callback,
++                        std::optional<std::string> body);
+   void OnFetchResult(const network::SimpleURLLoader* loader,
+                      OnFetchResultCallback on_result,
+                      std::optional<std::string> body);
+--- a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
++++ b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
+@@ -28,6 +28,7 @@
+ #include "base/metrics/field_trial_params.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/metrics/histogram_macros.h"
++#include "base/no_destructor.h"
+ #include "base/strings/strcat.h"
+ #include "base/strings/string_number_conversions.h"
+ #include "base/strings/string_split.h"
+@@ -55,6 +56,7 @@
+ #include "chrome/browser/themes/custom_theme_supplier.h"
+ #include "chrome/browser/themes/theme_properties.h"
+ #include "chrome/browser/ui/actions/chrome_action_id.h"
++#include "chrome/browser/ui/sail/sail_ntp_prefs.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/color/chrome_color_id.h"
+ #include "chrome/browser/ui/hats/hats_service.h"
+@@ -95,8 +97,10 @@
+ #include "content/public/browser/storage_partition.h"
+ #include "content/public/browser/web_contents.h"
+ #include "mojo/public/cpp/bindings/callback_helpers.h"
++#include "net/http/http_request_headers.h"
+ #include "services/network/public/cpp/resource_request.h"
+ #include "services/network/public/cpp/simple_url_loader.h"
++#include "third_party/re2/src/re2/re2.h"
+ #include "services/network/public/mojom/url_response_head.mojom.h"
+ #include "third_party/skia/include/core/SkColor.h"
+ #include "ui/actions/actions.h"
+@@ -523,6 +527,18 @@
+       prefs::kNtpToolChipsVisible,
+       base::BindRepeating(&NewTabPageHandler::UpdateActionChipsVisibility,
+                           base::Unretained(this)));
++  // Sail: the look set from the Customize panel, and the shortcuts' icons.
++  for (const char* pref : {sail::prefs::kNtpLook, sail::prefs::kNtpIcons}) {
++    pref_change_registrar_.Add(
++        pref, base::BindRepeating(
++                  [](NewTabPageHandler* handler) {
++                    PrefService* prefs = handler->profile_->GetPrefs();
++                    handler->page_->SetSailLook(
++                        prefs->GetString(sail::prefs::kNtpLook),
++                        prefs->GetString(sail::prefs::kNtpIcons));
++                  },
++                  base::Unretained(this)));
++  }
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+   // `kSeedColorChangeCount` is registered by ThemeColorPickerHandler, which is
+@@ -572,6 +588,8 @@
+   registry->RegisterListPref(prefs::kNtpModulesOrder);
+   registry->RegisterBooleanPref(prefs::kNtpModulesVisible, true);
+   registry->RegisterBooleanPref(prefs::kNtpToolChipsVisible, true);
++  registry->RegisterStringPref(sail::prefs::kNtpLook, "{}");
++  registry->RegisterStringPref(sail::prefs::kNtpIcons, "{}");
+   registry->RegisterIntegerPref(prefs::kNtpCustomizeChromeButtonOpenCount, 0);
+   registry->RegisterDictionaryPref(prefs::kNtpModulesInteractedCountDict);
+   registry->RegisterDictionaryPref(prefs::kNtpModulesLoadedCountDict);
+@@ -859,6 +877,168 @@
+   page_->SetActionChipsVisibility(IsActionChipsVisible());
+ }
+ 
++namespace {
++
++// Sail: Google's apps show a sign-in page to a request without cookies, so
++// their icons come from Google's own set of product icons.
++GURL GoogleAppIcon(const GURL& page_url) {
++  static constexpr std::pair<std::string_view, std::string_view> kApps[] = {
++      {"mail.google.com", "gmail_2020q4"},
++      {"drive.google.com", "drive_2020q4"},
++      {"calendar.google.com", "calendar_2020q4"},
++      {"docs.google.com", "docs_2020q4"},
++      {"meet.google.com", "meet_2020q4"},
++  };
++  for (const auto& [host, name] : kApps) {
++    if (page_url.host() == host) {
++      return GURL(base::StrCat(
++          {"https://www.gstatic.com/images/branding/product/2x/", name,
++           "_96dp.png"}));
++    }
++  }
++  return GURL();
++}
++
++std::string LinkAttribute(std::string_view tag, std::string_view name) {
++  const RE2 pattern(base::StrCat(
++      {R"re((?i)\b)re", name,
++       R"re(\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))re"}));
++  std::string double_quoted, single_quoted, bare;
++  if (!RE2::PartialMatch(tag, pattern, &double_quoted, &single_quoted, &bare)) {
++    return std::string();
++  }
++  return !double_quoted.empty() ? double_quoted
++         : !single_quoted.empty() ? single_quoted
++                                  : bare;
++}
++
++// The best icon the page declares: an apple-touch-icon (made to fill a
++// square, like an app icon), else the largest PNG/ICO icon of 96 px or more.
++// SVG is skipped: chrome://image cannot decode it.
++std::pair<GURL, bool> PickSailIcon(std::string_view html, const GURL& base) {
++  static const base::NoDestructor<RE2> kLink(R"((?i)(<link\b[^>]*>))");
++  std::string_view input = html.substr(0, 512 * 1024);
++  std::string tag;
++  GURL best;
++  bool best_full = false;
++  int best_score = 0;
++  while (RE2::FindAndConsume(&input, *kLink, &tag)) {
++    const std::string rel = base::ToLowerASCII(LinkAttribute(tag, "rel"));
++    const std::string href = LinkAttribute(tag, "href");
++    if (href.empty()) {
++      continue;
++    }
++    const std::string type = base::ToLowerASCII(LinkAttribute(tag, "type"));
++    const GURL url = base.Resolve(href);
++    if (!url.SchemeIs(url::kHttpsScheme) ||
++        type.find("svg") != std::string::npos ||
++        base::EndsWith(url.path(), ".svg",
++                       base::CompareCase::INSENSITIVE_ASCII)) {
++      continue;
++    }
++    int size = 0;
++    for (std::string_view part :
++         base::SplitStringPiece(LinkAttribute(tag, "sizes"), " ",
++                                base::TRIM_WHITESPACE,
++                                base::SPLIT_WANT_NONEMPTY)) {
++      int width = 0;
++      const size_t x = part.find_first_of("xX");
++      if (x != std::string_view::npos &&
++          base::StringToInt(part.substr(0, x), &width)) {
++        size = std::max(size, width);
++      }
++    }
++    const std::vector<std::string_view> rels = base::SplitStringPiece(
++        rel, " ", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++    const bool touch = rel.find("apple-touch-icon") != std::string::npos;
++    const bool icon = std::ranges::find(rels, "icon") != rels.end();
++    int score = 0;
++    if (touch) {
++      score = 10000 + (size ? size : 180);
++    } else if (icon && size >= 96) {
++      score = size;
++    }
++    if (score > best_score) {
++      best_score = score;
++      best = url;
++      best_full = touch;
++    }
++  }
++  return {best, best_full};
++}
++
++}  // namespace
++
++void NewTabPageHandler::FindSailIcon(const GURL& page_url,
++                                     FindSailIconCallback callback) {
++  if (const GURL google = GoogleAppIcon(page_url); google.is_valid()) {
++    std::move(callback).Run(google.spec(), false);
++    return;
++  }
++  if (!page_url.SchemeIs(url::kHttpsScheme)) {
++    std::move(callback).Run(std::string(), false);
++    return;
++  }
++  auto traffic_annotation =
++      net::DefineNetworkTrafficAnnotation("sail_new_tab_page_site_icon", R"(
++        semantics {
++          sender: "Sail New Tab Page"
++          description:
++            "Reads the page of a New Tab Page shortcut to find the large icon "
++            "it declares, so that the shortcut can show it sharply."
++          trigger: "A shortcut is shown on the New Tab Page for the first "
++            "time in a week."
++          data: "None. The request carries no cookies."
++          destination: WEBSITE
++        }
++        policy {
++          cookies_allowed: NO
++          setting: "Give the shortcut your own icon from its Edit dialog."
++          policy_exception_justification: "Sail feature, no policy."
++        })");
++  auto request = std::make_unique<network::ResourceRequest>();
++  request->url = page_url;
++  request->credentials_mode = network::mojom::CredentialsMode::kOmit;
++  request->headers.SetHeader(net::HttpRequestHeaders::kAccept, "text/html");
++  auto loader =
++      network::SimpleURLLoader::Create(std::move(request), traffic_annotation);
++  loader->SetTimeoutDuration(base::Seconds(10));
++  loader->DownloadToString(
++      profile_->GetURLLoaderFactory().get(),
++      base::BindOnce(&NewTabPageHandler::OnSailPageLoaded,
++                     weak_ptr_factory_.GetWeakPtr(), loader.get(),
++                     std::move(callback)),
++      2 * 1024 * 1024);
++  loader_map_.insert({loader.get(), std::move(loader)});
++}
++
++void NewTabPageHandler::OnSailPageLoaded(
++    const network::SimpleURLLoader* loader,
++    FindSailIconCallback callback,
++    std::optional<std::string> body) {
++  const GURL page = loader->GetFinalURL();
++  auto [icon, full_bleed] =
++      body ? PickSailIcon(*body, page) : std::pair<GURL, bool>();
++  if (!icon.is_valid() && page.SchemeIs(url::kHttpsScheme)) {
++    // Many sites keep their app icon at the conventional address.
++    icon = page.GetWithEmptyPath().Resolve("/apple-touch-icon.png");
++    full_bleed = true;
++  }
++  loader_map_.erase(loader);
++  std::move(callback).Run(icon.is_valid() ? icon.spec() : std::string(),
++                          full_bleed);
++}
++
++void NewTabPageHandler::GetSailLook(GetSailLookCallback callback) {
++  PrefService* prefs = profile_->GetPrefs();
++  std::move(callback).Run(prefs->GetString(sail::prefs::kNtpLook),
++                          prefs->GetString(sail::prefs::kNtpIcons));
++}
++
++void NewTabPageHandler::SetSailIcons(const std::string& icons) {
++  profile_->GetPrefs()->SetString(sail::prefs::kNtpIcons, icons);
++}
++
+ void NewTabPageHandler::UpdateFooterVisibility() {
+ // TODO(b/502297163): Implement for Android.
+ #if !BUILDFLAG(IS_ANDROID)
+--- a/chrome/browser/ui/webui/side_panel/customize_chrome/customize_chrome.mojom
++++ b/chrome/browser/ui/webui/side_panel/customize_chrome/customize_chrome.mojom
+@@ -233,6 +233,11 @@
+ 
+   // Triggers a call to |CustomizeChromePage.SetFooterSettings()|.
+   UpdateFooterSettings();
++
++  // Sail: stores the look of the New Tab page, as JSON.
++  SetSailLook(string look);
++  // Triggers a call to |CustomizeChromePage.SetSailLook()|.
++  UpdateSailLook();
+ };
+ 
+ // WebUI-side handler for requests from the browser.
+@@ -254,6 +259,9 @@
+                     bool extension_policy_enabled,
+                     ManagementNoticeState management_notice_state);
+ 
++  // Sail: the look of the New Tab page, as JSON.
++  SetSailLook(string look);
++
+   // Sets the current theme.
+   SetTheme(Theme theme);
+   // Sets whether edit theme should be enabled.
+--- a/chrome/browser/ui/webui/side_panel/customize_chrome/customize_chrome_page_handler.h
++++ b/chrome/browser/ui/webui/side_panel/customize_chrome/customize_chrome_page_handler.h
+@@ -149,6 +149,8 @@
+   void UpdateToolChipsSettings() override;
+   void SetFooterVisible(bool visible) override;
+   void UpdateFooterSettings() override;
++  void SetSailLook(const std::string& look) override;
++  void UpdateSailLook() override;
+   void SetModulesVisible(bool visible) override;
+   void SetModuleDisabled(const std::string& module_id, bool disabled) override;
+   void UpdateModulesSettings() override;
+--- a/chrome/browser/ui/webui/side_panel/customize_chrome/customize_chrome_page_handler.cc
++++ b/chrome/browser/ui/webui/side_panel/customize_chrome/customize_chrome_page_handler.cc
+@@ -29,6 +29,7 @@
+ #include "chrome/browser/themes/theme_service_factory.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_features.h"
+ #include "chrome/browser/ui/color/chrome_color_id.h"
++#include "chrome/browser/ui/sail/sail_ntp_prefs.h"
+ #include "chrome/browser/ui/navigator/browser_navigator.h"
+ #include "chrome/browser/ui/navigator/browser_navigator_params.h"
+ #include "chrome/browser/ui/search/ntp_user_data_types.h"
+@@ -181,6 +182,10 @@
+       prefs::kNtpToolChipsVisible,
+       base::BindRepeating(&CustomizeChromePageHandler::UpdateToolChipsSettings,
+                           base::Unretained(this)));
++  pref_change_registrar_.Add(
++      sail::prefs::kNtpLook,
++      base::BindRepeating(&CustomizeChromePageHandler::UpdateSailLook,
++                          base::Unretained(this)));
+ 
+   ntp_custom_background_service_observation_.Observe(
+       ntp_custom_background_service_.get());
+@@ -576,6 +581,14 @@
+       profile_->GetPrefs()->GetBoolean(prefs::kNtpToolChipsVisible));
+ }
+ 
++void CustomizeChromePageHandler::SetSailLook(const std::string& look) {
++  profile_->GetPrefs()->SetString(sail::prefs::kNtpLook, look);
++}
++
++void CustomizeChromePageHandler::UpdateSailLook() {
++  page_->SetSailLook(profile_->GetPrefs()->GetString(sail::prefs::kNtpLook));
++}
++
+ void CustomizeChromePageHandler::SetFooterVisible(bool visible) {
+   profile_->GetPrefs()->SetBoolean(prefs::kNtpFooterVisible, visible);
+ }
+--- a/ui/webui/resources/cr_components/most_visited/most_visited.ts
++++ b/ui/webui/resources/cr_components/most_visited/most_visited.ts
+@@ -85,6 +85,13 @@
+   };
+ }
+ 
++// Sail: a large icon a site declares, served through chrome://image.
++export interface SailSiteIcon {
++  src: string;
++  // App icons (apple-touch-icon) are meant to fill their square.
++  full: boolean;
++}
++
+ export class MostVisitedElement extends MostVisitedElementBase {
+   static get is() {
+     return 'cr-most-visited';
+@@ -114,6 +121,17 @@
+         type: Boolean,
+         reflect: true,
+       },
++      /** Sail: the shortcuts' own icons, by URL (data: URLs). */
++      sailIcons: {type: Object},
++      /** Sail: large icons the sites declare, by URL. */
++      sailSiteIcons: {type: Object},
++      /** Sail: frosted glass behind the icons. */
++      sailGlass: {
++        type: Boolean,
++        reflect: true,
++        attribute: 'sail-glass',
++      },
++      sailDialogIcon_: {type: String, state: true},
+       /**
+        * If true, renders MV tiles in a single row up to 10 columns wide.
+        * If false, renders MV tiles in up to 2 rows up to 5 columns wide.
+@@ -203,6 +221,11 @@
+   accessor theme: MostVisitedTheme|null = null;
+   accessor nonEditable: boolean = false;
+   accessor hideTitle: boolean = false;
++  accessor sailIcons: Record<string, string> = {};
++  accessor sailSiteIcons: Record<string, SailSiteIcon> = {};
++  accessor sailGlass: boolean = false;
++  // The icon chosen in the dialog: a data: URL, or '' for the site's own.
++  protected accessor sailDialogIcon_: string = '';
+   accessor reflowOnOverflow: boolean = false;
+   accessor singleRow: boolean = false;
+   accessor expandableTilesEnabled: boolean = false;
+@@ -252,8 +275,6 @@
+   private prefetchTimer_: null|ReturnType<typeof setTimeout> = null;
+   private preconnectTimer_: null|ReturnType<typeof setTimeout> = null;
+   private dragImage_: HTMLImageElement;
+-  private mostVisitedHighDpiFaviconsEnabled_: boolean =
+-      loadTimeData.getBoolean('mostVisitedHighDpiFaviconsEnabled');
+ 
+   private accessor info_: MostVisitedInfo|null = null;
+ 
+@@ -396,6 +417,11 @@
+       this.onSingleRowChange_();
+     }
+ 
++    // Sail: ask the page for the sites' large icons.
++    if (changedPrivateProperties.has('tiles_') && this.tiles_.length) {
++      this.fire('sail-need-icons', this.tiles_.map(tile => tile.url));
++    }
++
+     if (changedPrivateProperties.has('tiles_')) {
+       if (this.tiles_.length > 0) {
+         this.onTilesRendered_();
+@@ -753,9 +779,8 @@
+   protected getFaviconUrl_(url: Url): string {
+     const faviconUrl = new URL('chrome://favicon2/');
+     faviconUrl.searchParams.set('size', '128');
+-    const scaleFactor = this.mostVisitedHighDpiFaviconsEnabled_ ?
+-        `${window.devicePixelRatio || 1}x` :
+-        '1x';
++    // Sail: always as sharp as the screen.
++    const scaleFactor = `${window.devicePixelRatio || 1}x`;
+     faviconUrl.searchParams.set('scaleFactor', scaleFactor);
+     faviconUrl.searchParams.set('showFallbackMonogram', '');
+     faviconUrl.searchParams.set('pageUrl', url);
+@@ -816,6 +841,7 @@
+     this.dialogTileTitle_ = '';
+     this.dialogTileUrl_ = '';
+     this.dialogTileUrlInvalid_ = false;
++    this.sailDialogIcon_ = '';
+     this.adding_ = true;
+     this.$.dialog.showModal();
+   }
+@@ -997,6 +1023,7 @@
+     this.dialogTileTitle_ = tile.title;
+     this.dialogTileUrl_ = tile.url;
+     this.dialogTileUrlInvalid_ = false;
++    this.sailDialogIcon_ = this.sailIcons[tile.url] || '';
+     this.$.dialog.showModal();
+   }
+ 
+@@ -1025,26 +1052,149 @@
+     if (newTitle.length === 0) {
+       newTitle = this.dialogTileUrl_;
+     }
++    const icon = this.sailDialogIcon_;
+     if (this.adding_) {
+       const {success} =
+           await this.browserProxy_.handler.addMostVisitedTile(newUrl, newTitle);
+       this.toast_(
+           success ? 'linkAddedMsg' : 'linkCantCreate', success,
+           TileSource.TOP_SITES);
++      if (success) {
++        this.saveSailIcon_('', newUrl, icon);
++      }
+     } else {
+       const oldTile = this.tiles_[this.actionMenuTargetIndex_]!;
++      let success = true;
+       if (oldTile.url !== newUrl || oldTile.title !== newTitle) {
+-        const {success} =
+-            await this.browserProxy_.handler.updateMostVisitedTile(
+-                oldTile, newUrl, newTitle);
++        ({success} = await this.browserProxy_.handler.updateMostVisitedTile(
++             oldTile, newUrl, newTitle));
+         this.toast_(
+             success ? 'linkEditedMsg' : 'linkCantEdit', success,
+             oldTile.source);
+       }
++      if (success) {
++        this.saveSailIcon_(oldTile.url, newUrl, icon);
++      }
+       this.actionMenuTargetIndex_ = -1;
+     }
+   }
+ 
++  // Sail: the shortcuts' own icons. They are kept by URL and handed to the
++  // page, which stores them, through a 'sail-icons-change' event.
++  private saveSailIcon_(oldUrl: string, newUrl: string, icon: string) {
++    const icons = {...this.sailIcons};
++    if (oldUrl !== newUrl) {
++      delete icons[oldUrl];
++    }
++    if (icon) {
++      icons[newUrl] = icon;
++    } else {
++      delete icons[newUrl];
++    }
++    if (JSON.stringify(icons) === JSON.stringify(this.sailIcons)) {
++      return;
++    }
++    this.sailIcons = icons;
++    this.fire('sail-icons-change', icons);
++  }
++
++  // The shortcut's own icon, else the site's large icon, else its favicon.
++  // App icons fill the square; other large icons nearly fill it.
++  protected getSailIcon_(url: Url): string {
++    return this.sailIcons[url] || this.sailSiteIcons[url]?.src || '';
++  }
++
++  protected getSailIconClass_(url: Url): string {
++    if (this.sailIcons[url]) {
++      return 'sail-custom';
++    }
++    const site = this.sailSiteIcons[url];
++    if (!site) {
++      return '';
++    }
++    return site.full ? 'sail-custom' : 'sail-large';
++  }
++
++  // The icon the shortcut will have: the chosen one, else the site's large
++  // icon, else its favicon.
++  protected getSailDialogPreview_(): string {
++    if (this.sailDialogIcon_) {
++      return this.sailDialogIcon_;
++    }
++    const url = normalizeUrl(this.dialogTileUrl_);
++    if (!url) {
++      return '';
++    }
++    return this.sailSiteIcons[this.dialogTileUrl_]?.src ||
++        this.sailSiteIcons[url.href]?.src || this.getFaviconUrl_(url.href);
++  }
++
++  protected getSailDialogPreviewClass_(): string {
++    if (this.sailDialogIcon_) {
++      return 'sail-custom';
++    }
++    const site = this.sailSiteIcons[this.dialogTileUrl_];
++    return site ? (site.full ? 'sail-custom' : 'sail-large') : '';
++  }
++
++  protected sailText_(key: 'change'|'reset'): string {
++    const italian = document.documentElement.lang.startsWith('it');
++    const texts = {
++      change: italian ? 'Cambia icona' : 'Change icon',
++      reset: italian ? 'Usa l\'icona del sito' : 'Use the site icon',
++    };
++    return texts[key];
++  }
++
++  protected onSailChooseIconClick_() {
++    this.shadowRoot.querySelector<HTMLInputElement>('#sailIconFile')!.click();
++  }
++
++  protected onSailResetIconClick_() {
++    this.sailDialogIcon_ = '';
++  }
++
++  // Squares the picture (cropping the middle, like an app icon) at 192 px.
++  protected async onSailIconFileChange_(e: Event) {
++    const input = e.target as HTMLInputElement;
++    const file = input.files?.[0];
++    input.value = '';
++    if (!file) {
++      return;
++    }
++    const dataUrl = await new Promise<string>((resolve, reject) => {
++      const reader = new FileReader();
++      reader.onload = () => resolve(reader.result as string);
++      reader.onerror = () => reject(reader.error);
++      reader.readAsDataURL(file);
++    });
++    const image = new Image();
++    image.src = dataUrl;
++    try {
++      await image.decode();
++    } catch {
++      return;
++    }
++    const size = 192;
++    const canvas = document.createElement('canvas');
++    canvas.width = size;
++    canvas.height = size;
++    const context = canvas.getContext('2d')!;
++    const width = image.naturalWidth || size;
++    const height = image.naturalHeight || size;
++    const scale = Math.max(size / width, size / height);
++    context.imageSmoothingQuality = 'high';
++    context.drawImage(
++        image, (size - width * scale) / 2, (size - height * scale) / 2,
++        width * scale, height * scale);
++    this.sailDialogIcon_ = canvas.toDataURL('image/png');
++  }
++
++  // Sail: lays the tiles out again after their size changed.
++  sailRelayout() {
++    this.onSingleRowChange_();
++  }
++
+   private getCurrentTargetIndex_(e: Event): number {
+     const target = e.currentTarget as HTMLElement;
+     return Number(target.dataset['index']);
+--- a/ui/webui/resources/cr_components/most_visited/most_visited.html.ts
++++ b/ui/webui/resources/cr_components/most_visited/most_visited.html.ts
+@@ -38,8 +38,9 @@
+                this.isFromEnterpriseShortcut_(item.source))}"
+           data-index="${index}">
+       </cr-icon-button>
+-      <div class="tile-icon">
+-        <img src="${this.getFaviconUrl_(item.url)}" draggable="false"
++      <div class="tile-icon ${this.getSailIconClass_(item.url)}">
++        <img src="${this.getSailIcon_(item.url) ||
++                    this.getFaviconUrl_(item.url)}" draggable="false"
+             ?hidden="${item.isQueryTile}" alt="">
+         <div class="query-tile-icon" draggable="false"
+             ?hidden="${!item.isQueryTile}">
+@@ -103,6 +104,29 @@
+           </span>
+         </div>
+       ` : ''}
++      <div id="sailIconHero">
++        <button id="sailIconPreview" type="button"
++            class="${this.getSailDialogPreviewClass_()}"
++            title="${this.sailText_('change')}"
++            ?disabled="${this.dialogIsReadonly_}"
++            @click="${this.onSailChooseIconClick_}">
++          ${this.getSailDialogPreview_() ? html`
++            <img src="${this.getSailDialogPreview_()}" alt="">` : ''}
++        </button>
++        <div id="sailIconActions" ?hidden="${this.dialogIsReadonly_}">
++          <button class="sail-link" type="button"
++              @click="${this.onSailChooseIconClick_}">
++            ${this.sailText_('change')}
++          </button>
++          <button class="sail-link" type="button"
++              ?hidden="${!this.sailDialogIcon_}"
++              @click="${this.onSailResetIconClick_}">
++            ${this.sailText_('reset')}
++          </button>
++        </div>
++        <input type="file" id="sailIconFile" accept="image/*" hidden
++            @change="${this.onSailIconFileChange_}">
++      </div>
+       <cr-input id="dialogInputName" label="${this.i18n('nameField')}"
+           .value="${this.dialogTileTitle_}"
+           ?readonly="${this.dialogIsReadonly_}" spellcheck="false" autofocus
+@@ -132,11 +156,13 @@
+   <cr-action-menu id="actionMenu">
+     <button id="actionMenuViewOrEdit" class="dropdown-item"
+         @click="${this.onViewOrEditClick_}">
++      <cr-icon icon="cr:edit-filled"></cr-icon>
+       ${this.actionMenuViewOrEditTitle_}
+     </button>
+     <button id="actionMenuRemove" class="dropdown-item"
+         @click="${this.onRemoveClick_}"
+         ?disabled="${this.actionMenuRemoveDisabled_}">
++      <cr-icon icon="cr:delete"></cr-icon>
+       ${this.i18n('linkRemove')}
+     </button>
+   </cr-action-menu>
+--- a/ui/webui/resources/cr_components/most_visited/most_visited.css
++++ b/ui/webui/resources/cr_components/most_visited/most_visited.css
+@@ -191,15 +191,18 @@
+   padding: 0;
+ }
+ 
++/* Sail: no lit-up frame around the tile; the icon lifts instead. */
+ :host(:not([reordering_])) .tile:hover,
+ :host(:not([reordering_])) #addShortcut:hover,
+ :host(:not([reordering_])) #showMore:hover,
+ :host(:not([reordering_])) #showLess:hover,
+ .force-hover {
+-  background-color: var(--tile-hover-color);
++  background-color: transparent;
+ }
+ 
+ .tile-icon {
++  transition: transform 250ms cubic-bezier(.2, .8, .2, 1),
++      box-shadow 250ms cubic-bezier(.2, .8, .2, 1);
+   align-items: center;
+   background-color: var(--tile-background-color);
+   border-radius: 8px;
+@@ -212,10 +215,51 @@
+ }
+ 
+ .tile-icon img {
+-  height: 30px;
+-  width: 30px;
++  height: var(--sail-favicon-size, 30px);
++  width: var(--sail-favicon-size, 30px);
++}
++
++/* Sail: a shortcut's own icon fills its square, like an app icon. */
++.tile-icon.sail-custom {
++  background: none;
++  overflow: hidden;
++}
++
++.tile-icon.sail-custom img {
++  height: 100%;
++  object-fit: cover;
++  width: 100%;
++}
++
++/* Sail: a large logo that is not an app icon nearly fills its square. */
++.tile-icon.sail-large img {
++  height: 78%;
++  object-fit: contain;
++  width: 78%;
++}
++
++/* Sail: frosted glass behind the icons. */
++:host([sail-glass]) .tile-icon:not(.sail-custom),
++:host([sail-glass]) #addShortcut .tile-icon {
++  backdrop-filter: blur(18px) saturate(170%);
++  background-color: rgba(255, 255, 255, .16);
++  box-shadow: inset 0 0 0 .5px rgba(255, 255, 255, .28),
++      0 6px 18px rgba(0, 0, 0, .22);
++}
++
++:host([sail-glass]) .tile-icon {
++  border-radius: 28%;
++}
++
++:host([sail-glass]) .tile-icon.sail-custom {
++  box-shadow: 0 6px 18px rgba(0, 0, 0, .28);
+ }
+ 
++:host([sail-glass]) #addShortcutIcon {
++  background-color: white;
++}
++
++
+ .managed-tile-icon {
+   align-items: center;
+   background-color: var(--managed-tile-background-color);
+@@ -299,27 +343,35 @@
+   z-index: 2;
+ }
+ 
++/* Sail: a small glass button on the icon's corner, shown at once. */
+ cr-icon-button {
+-  --cr-icon-button-fill-color: var(--icon-button-color);
+-  --cr-icon-button-size: 28px;
++  --cr-icon-button-fill-color: white;
++  --cr-icon-button-icon-size: 16px;
++  --cr-icon-button-size: 24px;
+   --cr-icon-button-transition: none;
+-  margin: 4px 4px;
++  backdrop-filter: blur(12px);
++  background-color: rgba(30, 30, 32, .78);
++  border-radius: 50%;
++  box-shadow: 0 2px 8px rgba(0, 0, 0, .3),
++      inset 0 0 0 .5px rgba(255, 255, 255, .18);
++  margin: 0;
+   opacity: 0;
+   position: absolute;
+-  right: 0;
+-  top: 0;
++  right: calc((var(--tile-size) - var(--icon-size)) / 2 - 9px);
++  top: calc(var(--most-visited-icon-margin-top, 16px) - 9px);
+   transition: opacity 100ms ease-in-out;
++  z-index: 1;
+ }
+ 
+ :host-context([dir=rtl]) cr-icon-button {
+-  left: 0;
++  left: calc((var(--tile-size) - var(--icon-size)) / 2 - 9px);
+   right: unset;
+ }
+ 
+ :host(:not([reordering_])) .tile:hover cr-icon-button,
+ .force-hover cr-icon-button {
+   opacity: 1;
+-  transition-delay: 400ms;
++  transition-delay: 0s;
+ }
+ 
+ :host(:not([reordering_])) cr-icon-button:active,
+@@ -331,8 +383,9 @@
+   transition-delay: 0s;
+ }
+ 
++/* Sail: the dialog grows with the icon on top. */
+ #dialogContent {
+-  height: 160px;
++  height: auto;
+ }
+ 
+ /* When the policy subtitle is visible, the dialog content needs to be
+@@ -375,3 +428,177 @@
+   --cr-dialog-width: min(380px, calc(100vw - 32px));
+ }
+ </if>
++
++/* Sail: the hover lifts the icon instead of lighting up the whole tile. */
++:host(:not([reordering_])) .tile:hover .tile-icon,
++:host(:not([reordering_])) #addShortcut:hover .tile-icon,
++.force-hover .tile-icon {
++  box-shadow: 0 10px 24px rgba(0, 0, 0, .35);
++  transform: translateY(-3px) scale(1.06);
++}
++
++:host(:not([reordering_])) cr-icon-button:hover {
++  --cr-icon-button-fill-color: white;
++  background-color: rgba(60, 60, 64, .9);
++}
++
++/* Sail: the Edit / Remove menu. */
++#actionMenu {
++  --cr-menu-background-color: rgba(34, 34, 37, .97);
++  --cr-menu-border-radius: 14px;
++  --cr-menu-shadow: 0 14px 36px rgba(0, 0, 0, .4),
++      0 0 0 .5px rgba(255, 255, 255, .12);
++  --cr-primary-text-color: rgba(255, 255, 255, .92);
++}
++
++#actionMenu .dropdown-item {
++  border-radius: 9px;
++  font-size: 13px;
++  gap: 10px;
++  margin: 5px;
++  min-height: 34px;
++  padding: 0 12px;
++  width: calc(100% - 10px);
++}
++
++#actionMenu .dropdown-item:hover,
++#actionMenu .dropdown-item:focus-visible {
++  background-color: rgba(255, 255, 255, .1);
++}
++
++#actionMenu .dropdown-item cr-icon {
++  --iron-icon-fill-color: currentColor;
++  --iron-icon-height: 16px;
++  --iron-icon-width: 16px;
++  opacity: .8;
++}
++
++#actionMenuRemove:not([disabled]) {
++  color: #ff6961;
++}
++
++/* Sail: the add / edit dialog. */
++#dialog {
++  --cr-dialog-background-color: #202023;
++  --cr-dialog-border-radius: 22px;
++  --cr-dialog-width: min(360px, calc(100vw - 32px));
++  --cr-dialog-title-slot-padding-top: 22px;
++  --cr-dialog-title-slot-padding-bottom: 4px;
++  --cr-input-background-color: rgba(255, 255, 255, .07);
++  --cr-input-border-radius: 10px;
++  --cr-input-color: white;
++  --cr-input-focus-color: rgba(255, 255, 255, .5);
++  --cr-input-hover-background-color: rgba(255, 255, 255, .1);
++  --cr-input-label-color: rgba(255, 255, 255, .6);
++  --cr-input-min-height: 38px;
++  --cr-input-padding-start: 12px;
++  --cr-input-padding-end: 12px;
++  --cr-input-underline-display: none;
++  --cr-primary-text-color: white;
++  --cr-secondary-text-color: rgba(255, 255, 255, .6);
++  color: white;
++}
++
++#dialog [slot=title] {
++  font-size: 16px;
++  font-weight: 600;
++  text-align: center;
++}
++
++#dialogContent cr-input {
++  margin-top: 12px;
++}
++
++#sailIconHero {
++  align-items: center;
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++  padding: 12px 0 6px;
++}
++
++#sailIconPreview {
++  align-items: center;
++  background-color: rgba(255, 255, 255, .1);
++  border: none;
++  border-radius: 22px;
++  box-shadow: 0 8px 22px rgba(0, 0, 0, .35),
++      inset 0 0 0 .5px rgba(255, 255, 255, .16);
++  cursor: pointer;
++  display: flex;
++  height: 84px;
++  justify-content: center;
++  overflow: hidden;
++  padding: 0;
++  transition: transform 200ms cubic-bezier(.2, .8, .2, 1);
++  width: 84px;
++}
++
++#sailIconPreview:hover:not([disabled]) {
++  transform: scale(1.04);
++}
++
++#sailIconPreview:active:not([disabled]) {
++  transform: scale(.96);
++}
++
++#sailIconPreview[disabled] {
++  cursor: default;
++}
++
++#sailIconPreview img {
++  height: 44px;
++  width: 44px;
++}
++
++#sailIconPreview.sail-custom img {
++  height: 100%;
++  object-fit: cover;
++  width: 100%;
++}
++
++#sailIconPreview.sail-large img {
++  height: 78%;
++  object-fit: contain;
++  width: 78%;
++}
++
++#sailIconActions {
++  display: flex;
++  gap: 14px;
++}
++
++.sail-link {
++  background: none;
++  border: none;
++  color: #8ab4f8;
++  cursor: pointer;
++  font: inherit;
++  font-size: 13px;
++  padding: 2px 0;
++}
++
++.sail-link:hover {
++  text-decoration: underline;
++}
++
++#dialog [slot=button-container] {
++  gap: 8px;
++  padding-top: 20px;
++}
++
++#dialog [slot=button-container] cr-button {
++  border-radius: 999px;
++  min-width: 96px;
++}
++
++#dialog .cancel-button {
++  --cr-button-background-color: rgba(255, 255, 255, .08);
++  --cr-button-border-color: transparent;
++  --cr-button-text-color: white;
++}
++
++#dialog .action-button {
++  --cr-button-background-color: white;
++  --cr-button-text-color: #111;
++}
+--- a/chrome/browser/resources/new_tab_page/app.ts
++++ b/chrome/browser/resources/new_tab_page/app.ts
+@@ -148,6 +148,81 @@
+ 
+ const PERMISSION_PROMPT_CSS_CLASS = 'permission-prompt-showing';
+ 
++// Sail: the look of the page, set from the Customize panel (see
++// chrome/browser/ui/sail/sail_ntp_prefs.h).
++export interface SailLook {
++  size: number;     // Shortcut tile, in px.
++  glass: boolean;   // Frosted glass behind the icons.
++  titles: boolean;  // Names under the shortcuts.
++  clock: boolean;   // Big clock and greeting above the shortcuts.
++  dim: number;      // Wallpaper darkening, 0 to 70 percent.
++  blur: number;     // Wallpaper blur, 0 to 30 px.
++}
++
++// Sail: a large icon a site declares, served through chrome://image.
++interface SailSiteIcon {
++  src: string;
++  full: boolean;
++}
++
++// Found icons are remembered for a week in this page's own storage, so the
++// sites are not asked again every time the page opens.
++const SAIL_ICON_CACHE_KEY = 'sailSiteIcons';
++const SAIL_ICON_CACHE_DAYS = 7;
++
++interface SailIconCacheEntry {
++  src: string;  // Empty when the site has no large icon.
++  full: boolean;
++  time: number;
++}
++
++function readSailIconCache(): Record<string, SailIconCacheEntry> {
++  try {
++    const parsed: unknown =
++        JSON.parse(localStorage.getItem(SAIL_ICON_CACHE_KEY) || '{}');
++    return parsed && typeof parsed === 'object' ?
++        parsed as Record<string, SailIconCacheEntry> :
++        {};
++  } catch {
++    return {};
++  }
++}
++
++function writeSailIconCache(cache: Record<string, SailIconCacheEntry>) {
++  try {
++    localStorage.setItem(SAIL_ICON_CACHE_KEY, JSON.stringify(cache));
++  } catch {
++    // Not remembered: the icon is looked up again next time.
++  }
++}
++
++// Loads the icon through chrome://image, which downloads it without cookies
++// and decodes it in a sandboxed process. Small images do not count.
++function probeSailIcon(iconUrl: string): Promise<string> {
++  const src = `chrome://image?url=${encodeURIComponent(iconUrl)}` +
++      '&staticEncode=true';
++  return new Promise(resolve => {
++    const image = new Image();
++    image.onload = () => resolve(image.naturalWidth >= 64 ? src : '');
++    image.onerror = () => resolve('');
++    image.src = src;
++  });
++}
++
++export const SAIL_LOOK_DEFAULTS: SailLook =
++    {size: 112, glass: false, titles: true, clock: false, dim: 0, blur: 0};
++
++function parseJsonObject(json: string): Record<string, unknown> {
++  try {
++    const value: unknown = JSON.parse(json);
++    return value && typeof value === 'object' && !Array.isArray(value) ?
++        value as Record<string, unknown> :
++        {};
++  } catch {
++    return {};
++  }
++}
++
+ const AppElementBase = HelpBubbleMixinLit(CrLitElement);
+ 
+ export interface AppElement {
+@@ -297,6 +372,10 @@
+       showWallpaperSearchButton_: {type: Boolean},
+       isActionChipsVisible_: {type: Boolean},
+       isFooterVisible_: {type: Boolean},
++      sailLook_: {type: Object, state: true},
++      sailIcons_: {type: Object, state: true},
++      sailSiteIcons_: {type: Object, state: true},
++      sailNow_: {type: Object, state: true},
+ 
+       ntpRealboxNextEnabled_: {
+         type: Boolean,
+@@ -436,6 +515,13 @@
+   protected accessor isActionChipsVisible_: boolean =
+       loadTimeData.getBoolean('actionChipsEnabled');
+   protected accessor isFooterVisible_: boolean = false;
++  protected accessor sailLook_: SailLook = {...SAIL_LOOK_DEFAULTS};
++  protected accessor sailIcons_: Record<string, string> = {};
++  protected accessor sailSiteIcons_: Record<string, SailSiteIcon> = {};
++  private sailIconLookups_: Set<string> = new Set();
++  protected accessor sailNow_: Date = new Date();
++  private sailLookListenerId_: number|null = null;
++  private sailClockTimer_: number|null = null;
+   protected accessor ntpRealboxNextEnabled_: boolean =
+       loadTimeData.getBoolean('ntpRealboxNextEnabled');
+   protected accessor searchboxCyclingPlaceholders_: boolean =
+@@ -602,6 +688,11 @@
+         });
+     this.pageHandler_.updateFooterVisibility();
+ 
++    this.sailLookListenerId_ = this.callbackRouter_.setSailLook.addListener(
++        (look: string, icons: string) => this.setSailLook_(look, icons));
++    this.pageHandler_.getSailLook().then(
++        ({look, icons}) => this.setSailLook_(look, icons));
++
+     // Open Customize Chrome if there are Customize Chrome URL params.
+     if (this.showCustomize_) {
+       this.setCustomizeChromeSidePanelVisible_(this.showCustomize_);
+@@ -657,9 +748,153 @@
+     this.callbackRouter_.removeListener(
+         this.setActionChipsVisibilityListenerId_!);
+     this.callbackRouter_.removeListener(this.footerVisibilityUpdatedListener_!);
++    this.callbackRouter_.removeListener(this.sailLookListenerId_!);
++    if (this.sailClockTimer_ !== null) {
++      clearInterval(this.sailClockTimer_);
++    }
+     this.eventTracker_.removeAll();
+   }
+ 
++  private setSailLook_(look: string, icons: string) {
++    const values = parseJsonObject(look);
++    const number = (key: 'size'|'dim'|'blur', min: number, max: number) => {
++      const value = values[key];
++      return typeof value === 'number' && Number.isFinite(value) ?
++          Math.min(max, Math.max(min, value)) :
++          SAIL_LOOK_DEFAULTS[key];
++    };
++    const flag = (key: 'glass'|'titles'|'clock') => {
++      const value = values[key];
++      return typeof value === 'boolean' ? value : SAIL_LOOK_DEFAULTS[key];
++    };
++    this.sailLook_ = {
++      size: number('size', 80, 176),
++      glass: flag('glass'),
++      titles: flag('titles'),
++      clock: flag('clock'),
++      dim: number('dim', 0, 70),
++      blur: number('blur', 0, 30),
++    };
++    const parsedIcons = parseJsonObject(icons);
++    const validIcons: Record<string, string> = {};
++    for (const [url, value] of Object.entries(parsedIcons)) {
++      if (typeof value === 'string' && value.startsWith('data:image/')) {
++        validIcons[url] = value;
++      }
++    }
++    this.sailIcons_ = validIcons;
++  }
++
++  // The size of the shortcuts, worked out from the tile like Chromium's
++  // own proportions (a 112 px tile has a 46 px icon square).
++  protected getSailTileStyle_(): string {
++    const size = this.sailLook_.size;
++    return `--most-visited-tile-size: ${size}px;` +
++        `--most-visited-icon-size: ${Math.round(size * 0.41)}px;` +
++        `--sail-favicon-size: ${Math.round(size * 0.27)}px;` +
++        `--most-visited-icon-margin-top: ${Math.round(size * 0.14)}px;`;
++  }
++
++  protected getSailTime_(): string {
++    return this.sailNow_.toLocaleTimeString(
++        document.documentElement.lang || undefined,
++        {hour: '2-digit', minute: '2-digit'});
++  }
++
++  protected getSailGreeting_(): string {
++    const hour = this.sailNow_.getHours();
++    const italian = document.documentElement.lang.startsWith('it');
++    if (hour >= 5 && hour < 12) {
++      return italian ? 'Buongiorno' : 'Good morning';
++    }
++    if (hour >= 12 && hour < 18) {
++      return italian ? 'Buon pomeriggio' : 'Good afternoon';
++    }
++    if (hour >= 18 && hour < 23) {
++      return italian ? 'Buonasera' : 'Good evening';
++    }
++    return italian ? 'Buonanotte' : 'Good night';
++  }
++
++  protected onSailNeedIcons_(e: CustomEvent<string[]>) {
++    const cache = readSailIconCache();
++    const now = Date.now();
++    const maxAge = SAIL_ICON_CACHE_DAYS * 24 * 3600 * 1000;
++    for (const url of e.detail) {
++      if (this.sailSiteIcons_[url] || this.sailIconLookups_.has(url)) {
++        continue;
++      }
++      const cached = cache[url];
++      if (cached && now - cached.time < maxAge) {
++        if (cached.src) {
++          this.sailSiteIcons_ = {
++            ...this.sailSiteIcons_,
++            [url]: {src: cached.src, full: cached.full},
++          };
++        }
++        continue;
++      }
++      this.sailIconLookups_.add(url);
++      this.lookUpSailIcon_(url);
++    }
++  }
++
++  private async lookUpSailIcon_(url: string) {
++    const {iconUrl, fullBleed} = await this.pageHandler_.findSailIcon(url);
++    let src = iconUrl ? await probeSailIcon(iconUrl) : '';
++    let full = fullBleed;
++    if (!src && iconUrl && !iconUrl.endsWith('/apple-touch-icon.png')) {
++      // The declared icon did not load: try the conventional address.
++      src = await probeSailIcon(new URL('/apple-touch-icon.png', url).href);
++      full = true;
++    }
++    const cache = readSailIconCache();
++    cache[url] = {src, full, time: Date.now()};
++    writeSailIconCache(cache);
++    this.sailIconLookups_.delete(url);
++    if (src) {
++      this.sailSiteIcons_ = {...this.sailSiteIcons_, [url]: {src, full}};
++    }
++  }
++
++  protected onSailIconsChange_(e: CustomEvent<Record<string, string>>) {
++    this.sailIcons_ = e.detail;
++    this.pageHandler_.setSailIcons(JSON.stringify(e.detail));
++  }
++
++  // The wallpaper lives outside this element, in new_tab_page.html.
++  private applySailLook_() {
++    const look = this.sailLook_;
++    const background = document.body.querySelector<HTMLElement>(
++        '#backgroundImage');
++    if (background) {
++      const filters = [];
++      if (look.blur > 0) {
++        filters.push(`blur(${look.blur}px)`);
++      }
++      if (look.dim > 0) {
++        filters.push(`brightness(${1 - look.dim / 100})`);
++      }
++      background.style.filter = filters.join(' ');
++      // Keeps the blurred edges off the screen.
++      background.style.transform = look.blur > 0 ? 'scale(1.08)' : '';
++    }
++
++    if (look.clock && this.sailClockTimer_ === null) {
++      this.sailNow_ = new Date();
++      this.sailClockTimer_ =
++          setInterval(() => this.sailNow_ = new Date(), 10000);
++    } else if (!look.clock && this.sailClockTimer_ !== null) {
++      clearInterval(this.sailClockTimer_);
++      this.sailClockTimer_ = null;
++    }
++
++    const mostVisited =
++        this.shadowRoot.querySelector<HTMLElement&{sailRelayout(): void}>(
++            '#mostVisited');
++    mostVisited?.sailRelayout();
++  }
++
+   override willUpdate(changedProperties: PropertyValues<this>) {
+     super.willUpdate(changedProperties);
+ 
+@@ -769,6 +1004,11 @@
+       this.onThemeChange_();
+     }
+ 
++    if (changedPrivateProperties.has('sailLook_') ||
++        (changedPrivateProperties.has('lazyRender_') && this.lazyRender_)) {
++      this.applySailLook_();
++    }
++
+     if (changedPrivateProperties.has('isFooterVisible_') && this.lazyRender_) {
+       this.maybeRegisterCustomizeButtonHelpBubble_();
+     }
+--- a/chrome/browser/resources/new_tab_page/app.html
++++ b/chrome/browser/resources/new_tab_page/app.html
+@@ -1,7 +1,19 @@
+ <div id="content">
++  ${this.sailLook_.clock ? html`
++    <div id="sailClock">
++      <div id="sailTime">${this.getSailTime_()}</div>
++      <div id="sailGreeting">${this.getSailGreeting_()}</div>
++    </div>
++  ` : ''}
+   ${this.lazyRender_ ? html`
+     ${this.shortcutsEnabled_ ? html`
+       <cr-most-visited id="mostVisited" .theme="${this.theme_?.mostVisited || null}"
++          style="${this.getSailTileStyle_()}"
++          .sailIcons="${this.sailIcons_}" .sailGlass="${this.sailLook_.glass}"
++          .hideTitle="${!this.sailLook_.titles}"
++          .sailSiteIcons="${this.sailSiteIcons_}"
++          @sail-icons-change="${this.onSailIconsChange_}"
++          @sail-need-icons="${this.onSailNeedIcons_}"
+           single-row reflow-on-overflow
+           ?expandable-tiles-enabled="${this.ntpNextFeaturesEnabled_}"
+           max-tiles-in-collapsed-state="${this.maxTilesInCollapsedState_}"
+--- a/chrome/browser/resources/new_tab_page/app.css
++++ b/chrome/browser/resources/new_tab_page/app.css
+@@ -563,3 +563,29 @@
+     -webkit-mask-image: url(icons/link.svg);
+   }
+ }
++
++/* Sail: the clock and greeting above the shortcuts. */
++#sailClock {
++  align-items: center;
++  color: var(--color-new-tab-page-most-visited-foreground, white);
++  display: flex;
++  flex-direction: column;
++  margin-bottom: 28px;
++  text-shadow: 0 2px 18px rgba(0, 0, 0, .35);
++  user-select: none;
++}
++
++#sailTime {
++  font-size: clamp(56px, 9vw, 112px);
++  font-variant-numeric: tabular-nums;
++  font-weight: 600;
++  letter-spacing: -0.02em;
++  line-height: 1;
++}
++
++#sailGreeting {
++  font-size: clamp(16px, 1.8vw, 22px);
++  font-weight: 500;
++  margin-top: 10px;
++  opacity: .85;
++}
+--- a/chrome/browser/resources/side_panel/customize_chrome/BUILD.gn
++++ b/chrome/browser/resources/side_panel/customize_chrome/BUILD.gn
+@@ -37,6 +37,8 @@
+     "footer.ts",
+     "hover_button.html.ts",
+     "hover_button.ts",
++    "sail_look.html.ts",
++    "sail_look.ts",
+     "shortcuts.html.ts",
+     "shortcuts.ts",
+     "theme_snapshot.html.ts",
+@@ -65,6 +67,7 @@
+     "customize_toolbar/toolbar.css",
+     "footer.css",
+     "hover_button.css",
++    "sail_look.css",
+     "shortcuts.css",
+     "theme_snapshot.css",
+     "themes.css",
+--- a/chrome/browser/resources/side_panel/customize_chrome/app.ts
++++ b/chrome/browser/resources/side_panel/customize_chrome/app.ts
+@@ -15,6 +15,7 @@
+ import './customize_toolbar/toolbar.js';
+ import './footer.js';
+ import './tools.js';
++import './sail_look.js';
+ import './shortcuts.js';
+ import './themes.js';
+ import './wallpaper_search/wallpaper_search.js';
+--- a/chrome/browser/resources/side_panel/customize_chrome/app.html.ts
++++ b/chrome/browser/resources/side_panel/customize_chrome/app.html.ts
+@@ -5,6 +5,7 @@
+ import {html} from '//resources/lit/v3_0/lit.rollup.js';
+ 
+ import type {AppElement} from './app.js';
++import {sailLookTitle} from './sail_look.js';
+ 
+ export function getHtml(this: AppElement) {
+   // clang-format off
+@@ -48,6 +49,13 @@
+      ${this.isSourceTabFirstPartyNtp_() ? html`<hr class="sp-cards-separator">
+     <div id="shortcuts" class="section sp-card">
+       <customize-chrome-shortcuts></customize-chrome-shortcuts>
++    </div>
++    <hr class="sp-cards-separator">
++    <div id="sailLook" class="section sp-card">
++      <sp-heading hide-back-button>
++        <h2 slot="heading">${sailLookTitle()}</h2>
++      </sp-heading>
++      <customize-chrome-sail-look></customize-chrome-sail-look>
+     </div>`: ''}
+     ${(this.modulesEnabled_ && this.isSourceTabFirstPartyNtp_()) ? html`
+       <hr class="sp-cards-separator">
+--- /dev/null
++++ b/chrome/browser/resources/side_panel/customize_chrome/sail_look.css
+@@ -0,0 +1,60 @@
++/* Copyright 2026 The Sail Authors
++ * You can use, redistribute, and/or modify this source code under
++ * the terms of the GPL-3.0 license that can be found in the LICENSE file. */
++
++/* #css_wrapper_metadata_start
++ * #type=style-lit
++ * #css_wrapper_metadata_end */
++
++:host {
++  display: block;
++  padding: 0 16px 8px;
++}
++
++.row {
++  align-items: center;
++  display: flex;
++  gap: 12px;
++  min-height: 40px;
++}
++
++.row label,
++.label {
++  color: var(--cr-primary-text-color);
++  flex: 1;
++  font-size: 13px;
++}
++
++.slider {
++  padding: 6px 0 4px;
++}
++
++.slider .label {
++  display: block;
++  margin-bottom: 6px;
++}
++
++input[type=range] {
++  accent-color: var(--cr-checked-color, var(--cr-fallback-color-primary));
++  margin: 0;
++  width: 100%;
++}
++
++.ends {
++  color: var(--cr-secondary-text-color);
++  display: flex;
++  font-size: 11px;
++  justify-content: space-between;
++  margin-top: 2px;
++}
++
++.hint {
++  color: var(--cr-secondary-text-color);
++  font-size: 12px;
++  line-height: 16px;
++  margin: 8px 0 12px;
++}
++
++#reset {
++  margin-top: 4px;
++}
+--- /dev/null
++++ b/chrome/browser/resources/side_panel/customize_chrome/sail_look.html.ts
+@@ -0,0 +1,44 @@
++// Copyright 2026 The Sail Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++import {html} from '//resources/lit/v3_0/lit.rollup.js';
++
++import type {SailLookElement} from './sail_look.js';
++import {SAIL_LOOK_TEXT as TEXT} from './sail_look.js';
++
++export function getHtml(this: SailLookElement) {
++  // clang-format off
++  return html`<!--_html_template_start_-->
++<div class="slider">
++  <span class="label">${TEXT.size}</span>
++  <input type="range" min="80" max="176" step="8"
++      .value="${String(this.look.size)}" aria-label="${TEXT.size}"
++      data-key="size" @input="${this.onSliderInput_}">
++  <div class="ends"><span>${TEXT.small}</span><span>${TEXT.large}</span></div>
++</div>
++${(['glass', 'titles', 'clock'] as const).map(key => html`
++  <div class="row">
++    <label data-key="${key}" @click="${this.onLabelClick_}">${TEXT[key]}</label>
++    <cr-toggle ?checked="${this.look[key]}" aria-label="${TEXT[key]}"
++        data-key="${key}" @change="${this.onToggleChange_}">
++    </cr-toggle>
++  </div>
++`)}
++<div class="slider">
++  <span class="label">${TEXT.dim}</span>
++  <input type="range" min="0" max="70" step="5"
++      .value="${String(this.look.dim)}" aria-label="${TEXT.dim}"
++      data-key="dim" @input="${this.onSliderInput_}">
++</div>
++<div class="slider">
++  <span class="label">${TEXT.blur}</span>
++  <input type="range" min="0" max="30" step="2"
++      .value="${String(this.look.blur)}" aria-label="${TEXT.blur}"
++      data-key="blur" @input="${this.onSliderInput_}">
++</div>
++<div class="hint">${TEXT.iconHint}</div>
++<cr-button id="reset" @click="${this.onResetClick_}">${TEXT.reset}</cr-button>
++<!--_html_template_end_-->`;
++  // clang-format on
++}
+--- /dev/null
++++ b/chrome/browser/resources/side_panel/customize_chrome/sail_look.ts
+@@ -0,0 +1,164 @@
++// Copyright 2026 The Sail Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++// Sail: the "Page style" card of the Customize panel. It sets the look of the
++// New Tab page: the size of the shortcuts, glass behind their icons, their
++// names, a clock with a greeting, and how dark and blurred the wallpaper is.
++// The page itself (new_tab_page/app.ts) reads the same settings.
++
++import 'chrome://resources/cr_elements/cr_button/cr_button.js';
++import 'chrome://resources/cr_elements/cr_toggle/cr_toggle.js';
++
++import {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
++
++import {CustomizeChromeApiProxy} from './customize_chrome_api_proxy.js';
++import {getCss} from './sail_look.css.js';
++import {getHtml} from './sail_look.html.js';
++
++export interface SailLook {
++  size: number;
++  glass: boolean;
++  titles: boolean;
++  clock: boolean;
++  dim: number;
++  blur: number;
++}
++
++type SailLookKey = keyof SailLook;
++
++const DEFAULTS: SailLook =
++    {size: 112, glass: false, titles: true, clock: false, dim: 0, blur: 0};
++
++const ITALIAN = document.documentElement.lang.startsWith('it');
++
++export const SAIL_LOOK_TEXT = {
++  title: ITALIAN ? 'Stile della pagina' : 'Page style',
++  size: ITALIAN ? 'Grandezza delle scorciatoie' : 'Shortcut size',
++  small: ITALIAN ? 'Piccole' : 'Small',
++  large: ITALIAN ? 'Grandi' : 'Large',
++  glass: ITALIAN ? 'Vetro dietro le icone' : 'Glass behind the icons',
++  titles: ITALIAN ? 'Nomi delle scorciatoie' : 'Shortcut names',
++  clock: ITALIAN ? 'Orologio e saluto' : 'Clock and greeting',
++  dim: ITALIAN ? 'Scurisci lo sfondo' : 'Darken the wallpaper',
++  blur: ITALIAN ? 'Sfoca lo sfondo' : 'Blur the wallpaper',
++  reset: ITALIAN ? 'Ripristina' : 'Reset',
++  iconHint: ITALIAN ?
++      'Per dare a una scorciatoia un\'icona tua: ⋮ sulla scorciatoia → ' +
++          'Modifica.' :
++      'To give a shortcut your own icon: ⋮ on the shortcut → Edit.',
++};
++
++export function sailLookTitle(): string {
++  return SAIL_LOOK_TEXT.title;
++}
++
++function parse(json: string): SailLook {
++  let values: Record<string, unknown> = {};
++  try {
++    const parsed: unknown = JSON.parse(json);
++    if (parsed && typeof parsed === 'object') {
++      values = parsed as Record<string, unknown>;
++    }
++  } catch {
++    // Keep the defaults.
++  }
++  const look: SailLook = {...DEFAULTS};
++  const numbers: Array<'size'|'dim'|'blur'> = ['size', 'dim', 'blur'];
++  for (const key of numbers) {
++    const value = values[key];
++    if (typeof value === 'number') {
++      look[key] = value;
++    }
++  }
++  const flags: Array<'glass'|'titles'|'clock'> = ['glass', 'titles', 'clock'];
++  for (const key of flags) {
++    const value = values[key];
++    if (typeof value === 'boolean') {
++      look[key] = value;
++    }
++  }
++  return look;
++}
++
++export class SailLookElement extends CrLitElement {
++  static get is() {
++    return 'customize-chrome-sail-look';
++  }
++
++  static override get styles() {
++    return getCss();
++  }
++
++  override render() {
++    return getHtml.bind(this)();
++  }
++
++  static override get properties() {
++    return {
++      look: {type: Object},
++    };
++  }
++
++  accessor look: SailLook = {...DEFAULTS};
++  private listenerId_: number|null = null;
++  private frame_ = 0;
++
++  override connectedCallback() {
++    super.connectedCallback();
++    const proxy = CustomizeChromeApiProxy.getInstance();
++    this.listenerId_ = proxy.callbackRouter.setSailLook.addListener(
++        (look: string) => this.look = parse(look));
++    proxy.handler.updateSailLook();
++  }
++
++  override disconnectedCallback() {
++    super.disconnectedCallback();
++    CustomizeChromeApiProxy.getInstance().callbackRouter.removeListener(
++        this.listenerId_!);
++    cancelAnimationFrame(this.frame_);
++  }
++
++  private keyOf_(e: Event): SailLookKey {
++    return (e.currentTarget as HTMLElement).dataset['key'] as SailLookKey;
++  }
++
++  protected onSliderInput_(e: Event) {
++    const key = this.keyOf_(e) as 'size' | 'dim' | 'blur';
++    this.change_({[key]: Number((e.target as HTMLInputElement).value)});
++  }
++
++  protected onToggleChange_(e: CustomEvent<boolean>) {
++    const key = this.keyOf_(e) as 'glass' | 'titles' | 'clock';
++    this.change_({[key]: e.detail});
++  }
++
++  protected onLabelClick_(e: Event) {
++    const key = this.keyOf_(e) as 'glass' | 'titles' | 'clock';
++    this.change_({[key]: !this.look[key]});
++  }
++
++  protected onResetClick_() {
++    this.change_({...DEFAULTS});
++  }
++
++  private change_(change: Partial<SailLook>) {
++    this.look = {...this.look, ...change};
++    // Sliders send many events: store at most once a frame.
++    if (!this.frame_) {
++      this.frame_ = requestAnimationFrame(() => {
++        this.frame_ = 0;
++        CustomizeChromeApiProxy.getInstance().handler.setSailLook(
++            JSON.stringify(this.look));
++      });
++    }
++  }
++}
++
++declare global {
++  interface HTMLElementTagNameMap {
++    'customize-chrome-sail-look': SailLookElement;
++  }
++}
++
++customElements.define(SailLookElement.is, SailLookElement);

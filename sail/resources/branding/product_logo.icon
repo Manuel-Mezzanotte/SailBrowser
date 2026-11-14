@@ -1,0 +1,21 @@
+// Copyright 2026 The Sail Authors
+// You can use, redistribute, and/or modify this source code under
+// the terms of the GPL-3.0 license that can be found in the LICENSE file.
+
+CANVAS_DIMENSIONS, 56,
+FILL_RULE_NONZERO,
+MOVE_TO, 10.3f, 2,
+CUBIC_TO, 11.9f, 2, 13.2f, 3.3f, 13.2f, 4.9f,
+LINE_TO, 13.2f, 51.1f,
+CUBIC_TO, 13.2f, 52.7f, 11.9f, 54, 10.3f, 54,
+CUBIC_TO, 8.7f, 54, 7.4f, 52.7f, 7.4f, 51.1f,
+LINE_TO, 7.4f, 4.9f,
+CUBIC_TO, 7.4f, 3.3f, 8.7f, 2, 10.3f, 2,
+CLOSE,
+MOVE_TO, 19, 3.52f,
+QUADRATIC_TO, 19, 2, 20.04f, 3.11f,
+CUBIC_TO, 32.54f, 16.49f, 42.75f, 34.85f, 47.59f, 52.87f,
+QUADRATIC_TO, 47.9f, 54, 46.73f, 54,
+LINE_TO, 19.9f, 54,
+QUADRATIC_TO, 19, 54, 19, 53.1f,
+CLOSE

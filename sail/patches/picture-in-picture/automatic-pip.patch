@@ -1,0 +1,170 @@
+Sail: picture-in-picture opens by itself when you switch tabs or when another
+app covers the window, on every site, without the allow/block question.
+Settings and sail://flags can still turn it off.
+
+Auto picture-in-picture that opened because the window was covered ends
+when the user is back in the window, not as soon as it is visible again:
+switching desktops shows it for a moment, and the picture-in-picture
+window would close and reopen.
+
+--- a/chrome/browser/metrics/chrome_feature_list_creator.cc
++++ b/chrome/browser/metrics/chrome_feature_list_creator.cc
+@@ -37,8 +37,10 @@
+ #include "components/webui/flags/pref_service_flags_storage.h"
+ #include "content/public/common/content_switch_dependent_feature_overrides.h"
+ #include "content/public/common/content_switches.h"
++#include "media/base/media_switches.h"
+ #include "services/network/public/cpp/network_switches.h"
+ #include "services/network/public/cpp/shared_url_loader_factory.h"
++#include "third_party/blink/public/common/features.h"
+ #include "ui/base/resource/resource_bundle.h"
+ 
+ #if BUILDFLAG(IS_WIN)
+@@ -236,13 +238,24 @@
+       about_flags::RegisterAllFeatureVariationParameters(&flags_storage,
+                                                          feature_list.get());
+ 
++  std::vector<base::FeatureList::FeatureOverrideInfo> extra_overrides =
++      content::GetSwitchDependentFeatureOverrides(
++          *base::CommandLine::ForCurrentProcess());
++  // Sail: picture-in-picture opens by itself when you leave a tab with a
++  // playing video, or when another app covers the window. These are defaults
++  // only: the flags in sail://flags still turn them off.
++  extra_overrides.emplace_back(
++      std::cref(blink::features::kBrowserInitiatedAutomaticPictureInPicture),
++      base::FeatureList::OVERRIDE_ENABLE_FEATURE);
++  extra_overrides.emplace_back(
++      std::cref(media::kAutoPictureInPictureOnWindowOccluded),
++      base::FeatureList::OVERRIDE_ENABLE_FEATURE);
++
+   variations::VariationsService* variations_service =
+       metrics_services_manager_->GetVariationsService();
+   variations_service->SetUpFieldTrials(
+-      variation_ids,
+-      content::GetSwitchDependentFeatureOverrides(
+-          *base::CommandLine::ForCurrentProcess()),
+-      std::move(feature_list), browser_field_trials_.get());
++      variation_ids, extra_overrides, std::move(feature_list),
++      browser_field_trials_.get());
+   variations::InitCrashKeys();
+ }
+ 
+--- a/chrome/browser/picture_in_picture/auto_picture_in_picture_tab_helper.h
++++ b/chrome/browser/picture_in_picture/auto_picture_in_picture_tab_helper.h
+@@ -8,6 +8,7 @@
+ #include "base/gtest_prod_util.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/weak_ptr.h"
++#include "base/timer/timer.h"
+ #include "base/time/time.h"
+ #include "build/build_config.h"
+ #include "chrome/browser/picture_in_picture/auto_picture_in_picture_window_occlusion_helper_base.h"
+@@ -362,6 +363,12 @@
+   std::unique_ptr<AutoPictureInPictureWindowOcclusionHelperBase>
+       window_occlusion_helper_;
+ 
++  // Sail: a browser window that becomes visible again (another desktop, an
++  // app moved away) does not end auto picture-in-picture by itself; it ends
++  // once the user is back in the window, which this timer checks for.
++  base::RepeatingTimer sail_visible_exit_timer_;
++  void SailMaybeExitWhenWindowActive();
++
+   // True if the media session associated with the observed WebContents has
+   // gained audio focus.
+   bool has_audio_focus_ = false;
+--- a/chrome/browser/picture_in_picture/auto_picture_in_picture_tab_helper.cc
++++ b/chrome/browser/picture_in_picture/auto_picture_in_picture_tab_helper.cc
+@@ -3,6 +3,8 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/picture_in_picture/auto_picture_in_picture_tab_helper.h"
++#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ 
+ #include "base/feature_list.h"
+ #include "base/metrics/histogram_functions.h"
+@@ -452,6 +454,20 @@
+   }
+ }
+ 
++void AutoPictureInPictureTabHelper::SailMaybeExitWhenWindowActive() {
++  if (!is_in_picture_in_picture_) {
++    sail_visible_exit_timer_.Stop();
++    return;
++  }
++  BrowserWindowInterface* browser =
++      GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
++          web_contents());
++  if (browser && browser->IsActive()) {
++    sail_visible_exit_timer_.Stop();
++    MaybeExitAutoPictureInPicture();
++  }
++}
++
+ void AutoPictureInPictureTabHelper::OnOcclusionStateChanged(
+     OcclusionState occlusion_state) {
+   // If the tab is not the active tab in its window, then the window becoming
+@@ -460,6 +476,9 @@
+     return;
+   }
+ 
++  if (occlusion_state != OcclusionState::kVisible) {
++    sail_visible_exit_timer_.Stop();
++  }
+   switch (occlusion_state) {
+     case OcclusionState::kOccluded:
+       if (!is_in_picture_in_picture_) {
+@@ -468,7 +487,16 @@
+       }
+       break;
+     case OcclusionState::kVisible:
+-      MaybeExitAutoPictureInPicture();
++      // Sail: only once the user is back in the window (see
++      // sail_visible_exit_timer_).
++      SailMaybeExitWhenWindowActive();
++      if (is_in_picture_in_picture_) {
++        sail_visible_exit_timer_.Start(
++            FROM_HERE, base::Milliseconds(300),
++            base::BindRepeating(
++                &AutoPictureInPictureTabHelper::SailMaybeExitWhenWindowActive,
++                base::Unretained(this)));
++      }
+       break;
+     case OcclusionState::kHidden:
+       // Don't make any changes for a hidden state. If we're already in autopip
+@@ -759,7 +787,9 @@
+ 
+ bool AutoPictureInPictureTabHelper::MeetsMediaEngagementConditions() const {
+   // Skip checking media engagement when content setting is set to allow.
+-  if (GetCurrentContentSetting() == CONTENT_SETTING_ALLOW) {
++  // Sail: "ask" is the default, shown as "allowed" in settings, and it allows
++  // without asking. Only an explicit block stops automatic picture-in-picture.
++  if (GetCurrentContentSetting() != CONTENT_SETTING_BLOCK) {
+     return true;
+   }
+ 
+--- a/chrome/browser/picture_in_picture/auto_pip_setting_helper.cc
++++ b/chrome/browser/picture_in_picture/auto_pip_setting_helper.cc
+@@ -130,20 +130,9 @@
+     views::View* anchor_view,
+     views::BubbleBorder::Arrow arrow) {
+   switch (GetEffectiveContentSetting()) {
++    // Sail: no "allow / block" question inside the window. "Ask" is the
++    // default and means allowed; sites can still be blocked in settings.
+     case CONTENT_SETTING_ASK:
+-      // If the user already said to allow once, then continue allowing.  It's
+-      // assumed that we're used for at most one visit to a site.
+-      if (already_selected_allow_once_) {
+-        RecordResult(PromptResult::kNotShownAllowedOnce, auto_pip_reason,
+-                     std::move(source_id));
+-        return nullptr;
+-      }
+-      // Create and return the UI to ask the user.
+-      ui_was_shown_but_not_acknowledged_ = true;
+-      return std::make_unique<AutoPipSettingOverlayView>(
+-          CreateResultCb(std::move(close_pip_cb), auto_pip_reason,
+-                         std::move(source_id)),
+-          origin_, anchor_view, arrow);
+     case CONTENT_SETTING_ALLOW:
+       // Nothing to do -- allow the auto pip to proceed.
+       RecordResult(PromptResult::kNotShownAllowedOnEveryVisit, auto_pip_reason,

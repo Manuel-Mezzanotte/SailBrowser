@@ -1,0 +1,478 @@
+Sail: a picture-in-picture button on the videos in web pages, like Zen's. It
+comes up at the right edge of the video under the mouse. It is a built-in
+extension, packaged like Helium's //components/extstore_fixups. Its resource
+ids come last in resource_ids.spec, so that adding it does not renumber the
+resources of the rest of the browser.
+
+--- /dev/null
++++ b/components/sail_pip_button/BUILD.gn
+@@ -0,0 +1,41 @@
++# Copyright 2026 The Sail Authors
++# You can use, redistribute, and/or modify this source code under
++# the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++# Sail: the built-in extension that puts a picture-in-picture button on the
++# videos in web pages. Packaged like Helium's //components/extstore_fixups.
++
++import("//tools/grit/grit_rule.gni")
++import("//ui/webui/resources/tools/generate_grd.gni")
++
++generated_grd = "$target_gen_dir/resources.grd"
++
++generate_grd("sail_pip_button_grd") {
++  out_grd = generated_grd
++
++  grd_prefix = "sail_pip_button"
++  resource_path_prefix = "sail_pip_button"
++
++  input_files_base_dir = rebase_path(".", "//")
++  input_files = [
++    "manifest.json",
++    "pip-button.js",
++  ]
++}
++
++grit("sail_pip_button") {
++  source = generated_grd
++
++  # Required because the .grd is generated.
++  enable_input_discovery_for_gn_analyze = false
++  output_dir = "$target_gen_dir/resources"
++
++  outputs = [
++    "grit/sail_pip_button_resources.h",
++    "grit/sail_pip_button_resources_map.cc",
++    "grit/sail_pip_button_resources_map.h",
++    "sail_pip_button_resources.pak",
++  ]
++
++  deps = [ ":sail_pip_button_grd" ]
++}
+--- /dev/null
++++ b/components/sail_pip_button/extension_ids.h
+@@ -0,0 +1,16 @@
++// Copyright 2026 The Sail Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#ifndef COMPONENTS_SAIL_PIP_BUTTON_EXTENSION_IDS_H_
++#define COMPONENTS_SAIL_PIP_BUTTON_EXTENSION_IDS_H_
++
++namespace sail {
++
++// The built-in extension that puts a picture-in-picture button on videos.
++inline constexpr char kPipButtonExtensionId[] =
++    "bomlainljgdpefhphjkiejajhipffjil";
++
++}  // namespace sail
++
++#endif  // COMPONENTS_SAIL_PIP_BUTTON_EXTENSION_IDS_H_
+--- /dev/null
++++ b/components/sail_pip_button/manifest.json
+@@ -0,0 +1,20 @@
++// Copyright 2026 The Sail Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++{
++  "name": "sail-pip-button",
++  // chrome-extension://bomlainljgdpefhphjkiejajhipffjil
++  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuaP59TLN7JiO8jkQ9CUsiaH1OFSNDXC/VJawHlWY4WzmEp4her5OjPB90HDl3J0xmc266xcMZiAXVAgvt04X6n3UMgMtTy7wJjt+ED2P+EwMcYCbxbBTRPJIGztgxUQZOXDp5BJ17fbel6oZKJaqPr7EY5UP905a6v/X4rIxEQOeIUxpCaqm+C3vcsF5V89bCpnzK3mSzJp9k/bi1BOHcuCY3oQl0UtnC/7tPifqhsMM0B4geT2bTl5RhPQSavRnTHqam3M+wBw1Mec+Y0unYXbvHdySIq6mxNzLRQxdfd6NTZSV262BbxcLi5+U50Tot2cX39/WhC6Zh0qCVyDkFwIDAQAB",
++  "version": "0.0.0",
++  "manifest_version": 3,
++  "content_scripts": [
++    {
++      "matches": [ "<all_urls>" ],
++      "all_frames": true,
++      "match_about_blank": true,
++      "run_at": "document_idle",
++      "js": [ "pip-button.js" ]
++    }
++  ]
++}
+--- /dev/null
++++ b/components/sail_pip_button/pip-button.js
+@@ -0,0 +1,274 @@
++// Copyright 2026 The Sail Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++// Sail: a picture-in-picture button on the videos in web pages, like the one
++// Zen shows. It comes up at the right edge of the video under the mouse. A
++// click opens picture in picture, or brings the video back if it is already
++// in it.
++
++(() => {
++  "use strict";
++
++  if (globalThis.sailPipButton ||
++      !(document.documentElement instanceof HTMLHtmlElement) ||
++      !document.pictureInPictureEnabled) {
++    return;
++  }
++  globalThis.sailPipButton = true;
++
++  // Like Zen: no button for short clips, previews and tiny videos.
++  const MIN_SECONDS = 45;
++  const MIN_WIDTH = 160;
++  const MIN_HEIGHT = 90;
++  // The button, and its distance from the video's right edge.
++  const SIZE = 40;
++  const MARGIN = 16;
++  // The button goes away when the mouse rests for this long.
++  const IDLE_MS = 2500;
++  // YouTube's hover previews are muted copies of the video: no button there.
++  const SKIP = "#inline-preview-player, ytd-video-preview, #video-preview";
++  const LABEL = "Picture in picture";
++
++  const CSS = `
++    button {
++      all: initial;
++      position: fixed;
++      top: 0;
++      left: 0;
++      box-sizing: border-box;
++      width: ${SIZE}px;
++      height: ${SIZE}px;
++      display: grid;
++      place-items: center;
++      border-radius: 10px;
++      background: rgba(28, 28, 30, .72);
++      border: .5px solid rgba(255, 255, 255, .18);
++      box-shadow: 0 6px 20px rgba(0, 0, 0, .28);
++      backdrop-filter: blur(22px) saturate(180%);
++      color: rgba(255, 255, 255, .92);
++      cursor: pointer;
++      opacity: 0;
++      scale: .9;
++      pointer-events: none;
++      transition: opacity .2s cubic-bezier(.2, .8, .2, 1),
++                  scale .2s cubic-bezier(.2, .8, .2, 1),
++                  background-color .2s;
++    }
++    button.show {
++      opacity: 1;
++      scale: 1;
++      pointer-events: auto;
++    }
++    button:hover {
++      background: rgba(58, 58, 62, .82);
++      color: #fff;
++    }
++    button:active {
++      scale: .88;
++    }
++    button:focus-visible {
++      outline: 2px solid rgba(255, 255, 255, .75);
++      outline-offset: 2px;
++    }
++    svg {
++      display: block;
++      width: 24px;
++      height: 24px;
++    }
++    @media (prefers-reduced-motion: reduce) {
++      button { transition: none; }
++    }
++  `;
++
++  // A window with an arrow going into the small window at its corner.
++  function icon() {
++    const ns = "http://www.w3.org/2000/svg";
++    const svg = document.createElementNS(ns, "svg");
++    svg.setAttribute("viewBox", "0 0 24 24");
++    svg.setAttribute("aria-hidden", "true");
++    const add = (tag, attributes) => {
++      const node = document.createElementNS(ns, tag);
++      for (const [name, value] of Object.entries(attributes)) {
++        node.setAttribute(name, value);
++      }
++      svg.append(node);
++    };
++    const stroke = {
++      fill: "none",
++      stroke: "currentColor",
++      "stroke-width": "1.8",
++      "stroke-linecap": "round",
++      "stroke-linejoin": "round",
++    };
++    add("path", {
++      d: "M11.5 19H5.5A2.5 2.5 0 0 1 3 16.5v-9A2.5 2.5 0 0 1 5.5 5h13" +
++         "A2.5 2.5 0 0 1 21 7.5V10.5",
++      ...stroke,
++    });
++    add("path", {d: "M7.5 8.5l4.6 4.6M12.4 9.3v4.1H8.3", ...stroke});
++    add("rect", {
++      x: "13.5", y: "13", width: "8", height: "6.5", rx: "1.6",
++      fill: "currentColor",
++    });
++    return svg;
++  }
++
++  const videos = document.getElementsByTagName("video");
++  let host = null;
++  let button = null;
++  // The video the button is on.
++  let target = null;
++  let frame = 0;
++  let idleTimer = 0;
++  let x = 0;
++  let y = 0;
++
++  function build() {
++    host = document.createElement("sail-pip-button");
++    host.style.cssText =
++        "all: initial; position: fixed; top: 0; left: 0; width: 0; " +
++        "height: 0; z-index: 2147483647;";
++    const root = host.attachShadow({mode: "closed"});
++    const sheet = new CSSStyleSheet();
++    sheet.replaceSync(CSS);
++    root.adoptedStyleSheets = [sheet];
++
++    button = document.createElement("button");
++    button.type = "button";
++    button.title = LABEL;
++    button.setAttribute("aria-label", LABEL);
++    button.append(icon());
++    root.append(button);
++
++    // The clicks are the button's, not the page's.
++    for (const type of ["pointerdown", "pointerup", "mousedown", "mouseup",
++                        "click", "dblclick", "contextmenu"]) {
++      button.addEventListener(type, (event) => {
++        event.stopPropagation();
++        if (type !== "contextmenu") {
++          event.preventDefault();
++        }
++      });
++    }
++    button.addEventListener("click", toggle);
++  }
++
++  function eligible(video) {
++    if (!video.isConnected || video.disablePictureInPicture ||
++        video.readyState < HTMLMediaElement.HAVE_METADATA ||
++        !video.videoWidth || video.closest(SKIP)) {
++      return false;
++    }
++    const duration = video.duration;
++    if (!(duration === Infinity || duration >= MIN_SECONDS)) {
++      return false;
++    }
++    const rect = video.getBoundingClientRect();
++    return rect.width >= MIN_WIDTH && rect.height >= MIN_HEIGHT;
++  }
++
++  function videoAt() {
++    for (const element of document.elementsFromPoint(x, y)) {
++      if (element.localName === "video") {
++        return element;
++      }
++    }
++    // Videos that let the mouse through (pointer-events: none) are not in
++    // the list above.
++    for (const video of videos) {
++      const rect = video.getBoundingClientRect();
++      if (x >= rect.left && x < rect.right && y >= rect.top &&
++          y < rect.bottom) {
++        return video;
++      }
++    }
++    return null;
++  }
++
++  function update() {
++    frame = 0;
++    const video = videos.length && !document.fullscreenElement ?
++        videoAt() : null;
++    if (video && eligible(video)) {
++      show(video);
++    } else {
++      hide();
++    }
++  }
++
++  function show(video) {
++    if (!host) {
++      build();
++    }
++    if (!host.isConnected) {
++      document.documentElement.append(host);
++    }
++    target = video;
++    const rect = video.getBoundingClientRect();
++    const left = Math.round(rect.right - MARGIN - SIZE);
++    const top = Math.round(rect.top + (rect.height - SIZE) / 2);
++    button.style.translate = `${left}px ${top}px`;
++    button.classList.add("show");
++    clearTimeout(idleTimer);
++    idleTimer = setTimeout(() => {
++      if (!button.matches(":hover")) {
++        hide();
++      }
++    }, IDLE_MS);
++  }
++
++  function hide() {
++    clearTimeout(idleTimer);
++    target = null;
++    button?.classList.remove("show");
++  }
++
++  async function toggle() {
++    const video = target;
++    hide();
++    if (!video) {
++      return;
++    }
++    try {
++      if (document.pictureInPictureElement === video) {
++        await document.exitPictureInPicture();
++      } else {
++        await video.requestPictureInPicture();
++      }
++    } catch {
++      // The site or the browser said no.
++    }
++  }
++
++  const schedule = () => {
++    frame ||= requestAnimationFrame(update);
++  };
++
++  document.addEventListener("pointermove", (event) => {
++    if (event.pointerType === "touch") {
++      return;
++    }
++    x = event.clientX;
++    y = event.clientY;
++    if (videos.length || target) {
++      schedule();
++    }
++  }, {capture: true, passive: true});
++
++  // The mouse left the page.
++  document.addEventListener("mouseout", (event) => {
++    if (!event.relatedTarget) {
++      hide();
++    }
++  }, {capture: true, passive: true});
++
++  // Follow the video while the page scrolls.
++  document.addEventListener("scroll", () => {
++    if (target) {
++      schedule();
++    }
++  }, {capture: true, passive: true});
++
++  document.addEventListener("fullscreenchange", hide);
++})();
+--- a/tools/gritsettings/resource_ids.spec
++++ b/tools/gritsettings/resource_ids.spec
+@@ -1808,6 +1808,13 @@
+     "includes": [12000],
+   },
+ 
++  # Sail: last, so that adding it does not move the ids of the files above
++  # (which would rebuild most of the browser).
++  "<(SHARED_INTERMEDIATE_DIR)/components/sail_pip_button/resources.grd": {
++    "META": {"sizes": {"includes": [20]}},
++    "includes": [12820],
++  },
++
+   # END "everything else" section.
+   # Everything but chrome/, components/, content/, and ios/
+ 
+--- a/chrome/chrome_paks.gni
++++ b/chrome/chrome_paks.gni
+@@ -133,6 +133,7 @@
+       "$root_gen_dir/components/components_resources.pak",
+       "$root_gen_dir/components/crashes_resources.pak",
+       "$root_gen_dir/components/extstore_fixups/resources/extstore_fixups_resources.pak",
++      "$root_gen_dir/components/sail_pip_button/resources/sail_pip_button_resources.pak",
+       "$root_gen_dir/components/flags_ui_resources.pak",
+       "$root_gen_dir/components/internal_debug_pages_disabled_resources.pak",
+       "$root_gen_dir/components/metrics/metrics_server_urls.pak",
+@@ -177,6 +178,7 @@
+       "//chrome/common:resources",
+       "//components/resources",
+       "//components/extstore_fixups",
++      "//components/sail_pip_button",
+       "//content:content_resources",
+       "//content/browser/resources",
+       "//mojo/public/js:resources",
+--- a/chrome/browser/extensions/BUILD.gn
++++ b/chrome/browser/extensions/BUILD.gn
+@@ -620,6 +620,7 @@
+     "//components/user_prefs",
+     "//components/vector_icons",
+     "//components/extstore_fixups",
++    "//components/sail_pip_button",
+     "//content/public/browser",
+     "//extensions/browser",
+     "//extensions/browser:crx_installer",
+--- a/chrome/browser/extensions/chrome_component_extension_resource_manager.cc
++++ b/chrome/browser/extensions/chrome_component_extension_resource_manager.cc
+@@ -24,6 +24,7 @@
+ #include "chrome/grit/theme_resources.h"
+ #include "components/contextual_tasks/public/features.h"
+ #include "components/extstore_fixups/resources/grit/extstore_fixups_resources_map.h"
++#include "components/sail_pip_button/resources/grit/sail_pip_button_resources_map.h"
+ #include "components/omnibox/common/omnibox_features.h"
+ #include "content/public/browser/browser_thread.h"
+ #include "extensions/browser/extension_config_map.h"
+@@ -131,6 +132,7 @@
+   }
+   AddComponentResourceEntries(kUblockResources);
+   AddComponentResourceEntries(kExtstoreFixupsResources);
++  AddComponentResourceEntries(kSailPipButtonResources);
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+   if (base::FeatureList::IsEnabled(features::kIndigo)) {
+--- a/chrome/browser/extensions/component_extensions_allowlist/allowlist.cc
++++ b/chrome/browser/extensions/component_extensions_allowlist/allowlist.cc
+@@ -21,6 +21,8 @@
+ #include "components/extstore_fixups/extension_ids.h"
+ #include "components/extstore_fixups/resources/grit/extstore_fixups_resources.h"
+ #include "components/helium_services/extension_ids.h"
++#include "components/sail_pip_button/extension_ids.h"
++#include "components/sail_pip_button/resources/grit/sail_pip_button_resources.h"
+ #include "extensions/buildflags/buildflags.h"
+ #include "extensions/common/constants.h"
+ #include "printing/buildflags/buildflags.h"
+@@ -46,6 +48,7 @@
+       extension_misc::kPdfExtensionId,
+       helium::kUBlockOriginComponentId,
+       helium::kExtstoreFixupsExtensionId,
++      sail::kPipButtonExtensionId,
+ #if BUILDFLAG(IS_CHROMEOS)
+       extension_misc::kAssessmentAssistantExtensionId,
+       extension_misc::kAccessibilityCommonExtensionId,
+@@ -108,6 +111,7 @@
+     case IDR_WEBSTORE_MANIFEST:
+     case IDR_UBLOCK_MANIFEST_JSON:
+     case IDR_EXTSTORE_FIXUPS_MANIFEST_JSON:
++    case IDR_SAIL_PIP_BUTTON_MANIFEST_JSON:
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+     // Separate ChromeOS list, as it is quite large.
+--- a/chrome/browser/extensions/component_loader.cc
++++ b/chrome/browser/extensions/component_loader.cc
+@@ -50,6 +50,7 @@
+ #include "components/prefs/pref_service.h"
+ #include "components/version_info/version_info.h"
+ #include "components/extstore_fixups/resources/grit/extstore_fixups_resources.h"
++#include "components/sail_pip_button/resources/grit/sail_pip_button_resources.h"
+ #include "content/public/browser/browser_thread.h"
+ #include "content/public/common/content_switches.h"
+ #include "extensions/browser/extension_file_task_runner.h"
+@@ -714,6 +715,9 @@
+     AddWebStoreApp();
+     AddUBlock();
+     AddExtstoreFixups();
++    // Sail: the picture-in-picture button on the videos in pages.
++    Add(IDR_SAIL_PIP_BUTTON_MANIFEST_JSON,
++        base::FilePath(FILE_PATH_LITERAL("sail_pip_button")));
+ #if BUILDFLAG(IS_CHROMEOS)
+     AddChromeApp();
+ #endif  // BUILDFLAG(IS_CHROMEOS)

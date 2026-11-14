@@ -1,0 +1,659 @@
+Sail: the picture-in-picture window behaves like Oblò.
+- Dragging the video moves the window; it stops at the screen edges, the menu
+  bar and the Dock, and crosses to another screen where they touch (as in Arc).
+- It can be as large as the screen (Chromium stops at 80%).
+- A click shows or hides the controls, a double click (or F) fills the screen.
+- Keys: K play/pause, J/L back/forward 10 s, Up/Down volume, M mute,
+  Esc back to the tab.
+- The volume is the tab's media session volume; it goes back to 100% when the
+  window closes, so the page's own volume control still counts.
+
+Play in the window also starts the video itself, not only the site's play
+action: a site in a hidden tab can ignore it, leaving the video paused.
+
+--- a/content/browser/media/session/media_session_impl.h
++++ b/content/browser/media/session/media_session_impl.h
+@@ -290,6 +290,12 @@
+   // Exit picture-in-picture.
+   void ExitPictureInPicture() override;
+ 
++  // Sail: volume set from the picture-in-picture window, from 0 to 1. It
++  // multiplies the page's own volume, the way ducking does, so it also applies
++  // to players the page adds later.
++  void SetSailVolume(double volume);
++  double sail_volume() const { return sail_volume_; }
++
+   // Automatically enter picture-in-picture from a non-user source (e.g. in
+   // reaction to content being hidden).
+   void EnterAutoPictureInPicture() override;
+@@ -661,6 +667,9 @@
+ 
+   double ducking_volume_multiplier_;
+ 
++  // Sail: see SetSailVolume().
++  double sail_volume_ = 1.0;
++
+   // True if the WebContents associated with this MediaSessionImpl is focused.
+   bool focused_ = false;
+ 
+--- a/content/browser/media/session/media_session_impl.cc
++++ b/content/browser/media/session/media_session_impl.cc
+@@ -897,7 +897,18 @@
+ }
+ 
+ double MediaSessionImpl::GetVolumeMultiplier() const {
+-  return is_ducking_ ? ducking_volume_multiplier_ : kUnduckedVolumeMultiplier;
++  return (is_ducking_ ? ducking_volume_multiplier_
++                      : kUnduckedVolumeMultiplier) *
++         sail_volume_;
++}
++
++void MediaSessionImpl::SetSailVolume(double volume) {
++  volume = std::clamp(volume, 0.0, 1.0);
++  if (volume == sail_volume_) {
++    return;
++  }
++  sail_volume_ = volume;
++  UpdateVolumeMultiplier();
+ }
+ 
+ bool MediaSessionImpl::IsActive() const {
+--- a/content/public/browser/video_picture_in_picture_window_controller.h
++++ b/content/public/browser/video_picture_in_picture_window_controller.h
+@@ -59,6 +59,12 @@
+   // Returns the current mute status of the media.
+   virtual bool GetMuteStatus() = 0;
+ 
++  // Sail: volume from the picture-in-picture window, from 0 to 1. It
++  // multiplies the page's own volume and goes back to 1 when the window
++  // closes.
++  virtual void SetVolume(double volume) {}
++  virtual double GetVolume() { return 1.0; }
++
+   // Called when the user interacts with the "Previous Slide" control.
+   virtual void PreviousSlide() = 0;
+ 
+--- a/content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.h
++++ b/content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.h
+@@ -78,6 +78,8 @@
+   void HangUp() override;
+   void RequestMute(bool mute) override;
+   bool GetMuteStatus() override;
++  void SetVolume(double volume) override;
++  double GetVolume() override;
+   void PreviousSlide() override;
+   void NextSlide() override;
+   void SeekTo(base::TimeDelta time) override;
+--- a/content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.cc
++++ b/content/browser/picture_in_picture/video_picture_in_picture_window_controller_impl.cc
+@@ -258,7 +258,12 @@
+   if (media_session_action_play_handled_) {
+     MediaSessionImpl::Get(web_contents())
+         ->Resume(MediaSession::SuspendType::kUI);
+-    return false /* still paused */;
++    // Sail: also start the video itself, like Firefox. A site in a hidden
++    // tab (YouTube, after switching tabs or desktops) can ignore the play
++    // action, which left the window paused for good.
++    active_session_->GetMediaPlayerRemote()->RequestPlay(
++        /*triggered_by_user=*/true);
++    return true /* playing */;
+   }
+ 
+   active_session_->GetMediaPlayerRemote()->RequestPlay(
+@@ -389,6 +394,10 @@
+   if (!active_session_ || active_session_->service() != service)
+     return;
+ 
++  // Sail: the window's volume only lasts while the window is open. Back in the
++  // page, the page's own volume control is the one that counts.
++  SetVolume(1.0);
++
+   active_session_->Shutdown();
+   active_session_ = nullptr;
+   pip_session_media_position_ = std::nullopt;
+@@ -476,6 +485,17 @@
+   return MediaSessionImpl::Get(web_contents())->GetMuteStatus();
+ }
+ 
++void VideoPictureInPictureWindowControllerImpl::SetVolume(double volume) {
++  if (web_contents()) {
++    MediaSessionImpl::Get(web_contents())->SetSailVolume(volume);
++  }
++}
++
++double VideoPictureInPictureWindowControllerImpl::GetVolume() {
++  return web_contents() ? MediaSessionImpl::Get(web_contents())->sail_volume()
++                        : 1.0;
++}
++
+ void VideoPictureInPictureWindowControllerImpl::SeekTo(base::TimeDelta time) {
+   // Default to the Media Session handler if it's available.
+   if (media_session_action_seek_to_handled_) {
+@@ -676,6 +696,10 @@
+         /*triggered_by_user=*/false);
+   }
+ 
++  // Sail: the window's volume only lasts while the window is open. Back in the
++  // page, the page's own volume control is the one that counts.
++  SetVolume(1.0);
++
+   active_session_->Shutdown();
+   active_session_ = nullptr;
+   pip_session_media_position_ = std::nullopt;
+--- a/chrome/browser/ui/views/overlay/video_overlay_window_views.h
++++ b/chrome/browser/ui/views/overlay/video_overlay_window_views.h
+@@ -6,6 +6,7 @@
+ #define CHROME_BROWSER_UI_VIEWS_OVERLAY_VIDEO_OVERLAY_WINDOW_VIEWS_H_
+ 
+ #include <optional>
++#include <vector>
+ 
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/weak_ptr.h"
+@@ -19,6 +20,8 @@
+ #include "content/public/browser/video_picture_in_picture_window_controller.h"
+ #include "ui/display/display.h"
+ #include "ui/display/display_observer.h"
++#include "ui/gfx/geometry/point.h"
++#include "ui/gfx/geometry/rect.h"
+ #include "ui/gfx/geometry/size.h"
+ #include "ui/views/view_observer.h"
+ #include "ui/views/widget/widget.h"
+@@ -321,6 +324,20 @@
+   // available.
+   void CloseAndPauseIfAvailable();
+ 
++  // Sail: the window behaves like Oblò. Dragging the video moves the window
++  // and stops it at the screen edges; a click shows or hides the controls; a
++  // double click fills the screen. Returns true if it handled `event`.
++  bool HandleSailMouseEvent(ui::MouseEvent* event);
++  // Handles Oblò's keys. Returns true if it handled `event`.
++  bool HandleSailKeyEvent(ui::KeyEvent* event);
++  // Grows the window to fill the screen it is on, or brings it back.
++  void ToggleFillScreen();
++  // Sets the volume from 0 to 1. Turning it all the way down mutes, turning it
++  // up again unmutes.
++  void SetSailVolume(double volume);
++  // Moves the window back onto the screens if it no longer fits on them.
++  void SettleOnScreens();
++
+   // Returns the current frame sink id for the surface displayed in the
+   // |video_view_|. If |video_view_| is not currently displaying a surface then
+   // returns nullptr.
+@@ -585,6 +602,27 @@
+   // True if the playback controls should be visible.
+   bool show_playback_controls_ = true;
+ 
++  // Sail: the drag in progress, if any.
++  struct SailDrag {
++    SailDrag();
++    SailDrag(const SailDrag&);
++    SailDrag& operator=(const SailDrag&);
++    ~SailDrag();
++
++    gfx::Point start_cursor;
++    gfx::Rect start_bounds;
++    gfx::Rect at;
++    // Where the window may pass while dragged, and where it may stop.
++    std::vector<gfx::Rect> pass;
++    std::vector<gfx::Rect> rest;
++    bool moved = false;
++  };
++  std::optional<SailDrag> sail_drag_;
++  // The bounds to go back to after filling the screen.
++  std::optional<gfx::Rect> bounds_before_fill_;
++  // Waits for a resize to end before moving the window back onto the screens.
++  base::OneShotTimer settle_timer_;
++
+   base::WeakPtrFactory<VideoOverlayWindowViews> weak_factory_{this};
+ };
+ 
+--- a/chrome/browser/ui/views/overlay/video_overlay_window_views.cc
++++ b/chrome/browser/ui/views/overlay/video_overlay_window_views.cc
+@@ -4,8 +4,13 @@
+ 
+ #include "chrome/browser/ui/views/overlay/video_overlay_window_views.h"
+ 
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <limits>
+ #include <memory>
+ #include <string>
++#include <vector>
+ 
+ #include "base/check.h"
+ #include "base/feature_list.h"
+@@ -172,6 +177,167 @@
+              : VideoOverlayWindowViews::WindowQuadrant::kBottomRight;
+ }
+ 
++// Sail: like in Arc (and Oblò), the window never leaves the screens. It moves
++// from one screen to the next where they touch, stops at the free edges, the
++// menu bar and the Dock, and slides along an edge when pushed diagonally.
++struct ScreenAreas {
++  // Where the window may come to rest: the work area of every screen.
++  std::vector<gfx::Rect> rest;
++  // Where it may pass while dragged: also the menu bar or Dock strip of a
++  // screen that has another screen on that side, or it could never cross
++  // from one to the other.
++  std::vector<gfx::Rect> pass;
++};
++
++ScreenAreas GetScreenAreas() {
++  ScreenAreas areas;
++  const std::vector<display::Display>& displays =
++      display::Screen::Get()->GetAllDisplays();
++  for (const display::Display& display : displays) {
++    areas.rest.push_back(display.work_area());
++  }
++  areas.pass = areas.rest;
++
++  const auto near = [](int a, int b) { return std::abs(a - b) < 2; };
++  const auto crosses = [](int a1, int a2, int b1, int b2) {
++    return a1 < b2 && b1 < a2;
++  };
++  for (const display::Display& display : displays) {
++    const gfx::Rect f = display.bounds();
++    const gfx::Rect a = display.work_area();
++    // The strips outside the work area, each with the side that bounds it.
++    const gfx::Rect strips[] = {
++        gfx::Rect(f.x(), f.y(), f.width(), a.y() - f.y()),
++        gfx::Rect(f.x(), a.bottom(), f.width(), f.bottom() - a.bottom()),
++        gfx::Rect(f.x(), a.y(), a.x() - f.x(), a.height()),
++        gfx::Rect(a.right(), a.y(), f.right() - a.right(), a.height()),
++    };
++    for (size_t side = 0; side < std::size(strips); ++side) {
++      if (strips[side].IsEmpty()) {
++        continue;
++      }
++      for (const display::Display& other : displays) {
++        if (other.id() == display.id()) {
++          continue;
++        }
++        const gfx::Rect o = other.bounds();
++        bool touches = false;
++        switch (side) {
++          case 0:  // Menu bar: a screen above.
++            touches = near(o.bottom(), f.y()) &&
++                      crosses(o.x(), o.right(), f.x(), f.right());
++            break;
++          case 1:  // Dock at the bottom: a screen below.
++            touches = near(o.y(), f.bottom()) &&
++                      crosses(o.x(), o.right(), f.x(), f.right());
++            break;
++          case 2:  // Dock on the left: a screen to the left.
++            touches = near(o.right(), f.x()) &&
++                      crosses(o.y(), o.bottom(), a.y(), a.bottom());
++            break;
++          case 3:  // Dock on the right: a screen to the right.
++            touches = near(o.x(), f.right()) &&
++                      crosses(o.y(), o.bottom(), a.y(), a.bottom());
++            break;
++        }
++        if (touches) {
++          areas.pass.push_back(strips[side]);
++          break;
++        }
++      }
++    }
++  }
++  return areas;
++}
++
++int64_t Overlap(const gfx::Rect& a, const gfx::Rect& b) {
++  const gfx::Rect overlap = gfx::IntersectRects(a, b);
++  return static_cast<int64_t>(overlap.width()) * overlap.height();
++}
++
++// Whether `rect` lies entirely on `areas`. The areas never overlap, so it is
++// enough that the parts on each of them add up to the whole window.
++bool Fits(const std::vector<gfx::Rect>& areas, const gfx::Rect& rect) {
++  int64_t covered = 0;
++  for (const gfx::Rect& area : areas) {
++    covered += Overlap(area, rect);
++  }
++  return covered >= static_cast<int64_t>(rect.width()) * rect.height();
++}
++
++// Goes from `start` towards `end` while `ok` holds: in steps of 16 px, then
++// to the pixel.
++template <typename Ok>
++int Farthest(int start, int end, Ok ok) {
++  int good = start;
++  while (good != end) {
++    const int next =
++        end > good ? std::min(good + 16, end) : std::max(good - 16, end);
++    if (!ok(next)) {
++      int bad = next;
++      while (std::abs(bad - good) > 1) {
++        const int mid = good + (bad - good) / 2;
++        if (ok(mid)) {
++          good = mid;
++        } else {
++          bad = mid;
++        }
++      }
++      return good;
++    }
++    good = next;
++  }
++  return good;
++}
++
++// Puts `rect` inside the area it is mostly on (or the closest one).
++gfx::Rect ClampToScreens(const std::vector<gfx::Rect>& areas,
++                         const gfx::Rect& rect) {
++  if (areas.empty()) {
++    return rect;
++  }
++  const gfx::Point center = rect.CenterPoint();
++  const gfx::Rect* best = &areas.front();
++  double best_score = -std::numeric_limits<double>::infinity();
++  for (const gfx::Rect& area : areas) {
++    const int dx = std::max({area.x() - center.x(), 0, center.x() - area.right()});
++    const int dy =
++        std::max({area.y() - center.y(), 0, center.y() - area.bottom()});
++    const double score = Overlap(area, rect) - std::hypot(dx, dy);
++    if (score > best_score) {
++      best_score = score;
++      best = &area;
++    }
++  }
++  const auto clamp = [](int value, int min, int max) {
++    return std::min(std::max(value, min), std::max(min, max));
++  };
++  return gfx::Rect(clamp(rect.x(), best->x(), best->right() - rect.width()),
++                   clamp(rect.y(), best->y(), best->bottom() - rect.height()),
++                   rect.width(), rect.height());
++}
++
++// Where the window gets to when it starts at `from` and wants to go to
++// `target`: first horizontally, then vertically, then horizontally again (for
++// corners).
++gfx::Rect Reach(const std::vector<gfx::Rect>& areas,
++                const gfx::Rect& from,
++                const gfx::Rect& target) {
++  if (Fits(areas, target)) {
++    return target;
++  }
++  if (!Fits(areas, from)) {
++    return ClampToScreens(areas, target);
++  }
++  const auto ok = [&](int x, int y) {
++    return Fits(areas, gfx::Rect(x, y, target.width(), target.height()));
++  };
++  int x = Farthest(from.x(), target.x(), [&](int v) { return ok(v, from.y()); });
++  const int y = Farthest(from.y(), target.y(), [&](int v) { return ok(x, v); });
++  x = Farthest(x, target.x(), [&](int v) { return ok(v, y); });
++  return gfx::Rect(x, y, target.width(), target.height());
++}
++
+ template <typename T>
+ T* AddChildView(std::vector<std::unique_ptr<views::View>>* views,
+                 std::unique_ptr<T> child) {
+@@ -259,8 +425,10 @@
+       return window_component;
+     }
+ 
+-    // Allows for dragging and resizing the window.
+-    return (window_component == HTNOWHERE) ? HTCAPTION : window_component;
++    // Allows for resizing the window from its edges. Sail moves the window
++    // itself when the video is dragged (see HandleSailMouseEvent()), so that
++    // it stops at the screen edges.
++    return (window_component == HTNOWHERE) ? HTCLIENT : window_component;
+   }
+ #if BUILDFLAG(IS_CHROMEOS)
+   void UpdateWindowRoundedCorners() override {
+@@ -596,6 +764,12 @@
+   // reappear when the user interacts with the window again.
+   UpdateControlsVisibility(false);
+ 
++  // Sail: macOS resizes the window from its edges; once it is done, put the
++  // window back on the screens if it ended up partly off them.
++  settle_timer_.Start(FROM_HERE, base::Milliseconds(350),
++                      base::BindOnce(&VideoOverlayWindowViews::SettleOnScreens,
++                                     base::Unretained(this)));
++
+   // Update the view layers to scale to |new_size|.
+   UpdateLayerBoundsWithLetterboxing(new_size);
+ 
+@@ -638,6 +812,11 @@
+     event->SetHandled();
+   }
+ 
++  if (!event->handled() && HandleSailKeyEvent(event)) {
++    MaybeUpdateMeetsUserInteraction(*event);
++    return;
++  }
++
+   // If there's no focused control, then we handle certain keys as if they went
+   // to the relevant control.
+   views::View* focused_view = GetFocusManager()->GetFocusedView();
+@@ -662,6 +841,11 @@
+ }
+ 
+ void VideoOverlayWindowViews::OnMouseEvent(ui::MouseEvent* event) {
++  if (HandleSailMouseEvent(event)) {
++    hide_controls_timer_.Reset();
++    return;
++  }
++
+   switch (event->type()) {
+       // Only show the media controls when the mouse is hovering over the
+       // window.
+@@ -977,8 +1161,8 @@
+     return;
+   }
+ 
+-  auto new_max_size =
+-      gfx::Size(work_area.width() * 0.8, work_area.height() * 0.8);
++  // Sail: as big as the screen allows, like Oblò (Chromium stops at 80%).
++  auto new_max_size = work_area.size();
+ 
+   // Ensure |new_max_size| is not smaller than |min_size_|, or else we will
+   // crash.
+@@ -2220,6 +2404,203 @@
+           : PictureInPictureWindowManager::UiBehavior::kCloseWindowOnly);
+ }
+ 
++VideoOverlayWindowViews::SailDrag::SailDrag() = default;
++VideoOverlayWindowViews::SailDrag::SailDrag(const SailDrag&) = default;
++VideoOverlayWindowViews::SailDrag& VideoOverlayWindowViews::SailDrag::operator=(
++    const SailDrag&) = default;
++VideoOverlayWindowViews::SailDrag::~SailDrag() = default;
++
++bool VideoOverlayWindowViews::HandleSailMouseEvent(ui::MouseEvent* event) {
++  switch (event->type()) {
++    case ui::EventType::kMousePressed: {
++      // Presses on the controls, the auto-pip question or the live caption
++      // dialog stay theirs.
++      if (!event->IsOnlyLeftMouseButton() ||
++          ControlsHitTestContainsPoint(event->location()) ||
++          IsOverlayViewShown() ||
++          (live_caption_dialog_ && live_caption_dialog_->GetVisible())) {
++        return false;
++      }
++      if (event->GetClickCount() == 2) {
++        sail_drag_.reset();
++        ToggleFillScreen();
++        event->SetHandled();
++        return true;
++      }
++      ScreenAreas areas = GetScreenAreas();
++      sail_drag_.emplace();
++      sail_drag_->start_cursor = display::Screen::Get()->GetCursorScreenPoint();
++      sail_drag_->start_bounds = GetBounds();
++      sail_drag_->at = sail_drag_->start_bounds;
++      sail_drag_->pass = std::move(areas.pass);
++      sail_drag_->rest = std::move(areas.rest);
++      event->SetHandled();
++      return true;
++    }
++
++    case ui::EventType::kMouseDragged: {
++      if (!sail_drag_) {
++        return false;
++      }
++      const gfx::Vector2d delta =
++          display::Screen::Get()->GetCursorScreenPoint() -
++          sail_drag_->start_cursor;
++      if (!sail_drag_->moved && std::hypot(delta.x(), delta.y()) < 3) {
++        event->SetHandled();
++        return true;
++      }
++      if (!sail_drag_->moved) {
++        sail_drag_->moved = true;
++        bounds_before_fill_.reset();
++      }
++      sail_drag_->at =
++          Reach(sail_drag_->pass, sail_drag_->at, sail_drag_->start_bounds + delta);
++      if (sail_drag_->at != GetBounds()) {
++        SetBounds(sail_drag_->at);
++      }
++      event->SetHandled();
++      return true;
++    }
++
++    case ui::EventType::kMouseReleased: {
++      if (!sail_drag_) {
++        return false;
++      }
++      const SailDrag drag = std::move(*sail_drag_);
++      sail_drag_.reset();
++      if (drag.moved) {
++        // Let go halfway over a menu bar: the window moves down below it.
++        if (!Fits(drag.rest, GetBounds())) {
++          SetBounds(ClampToScreens(drag.rest, GetBounds()));
++        }
++      } else {
++        UpdateControlsVisibility(!AreControlsVisible());
++      }
++      event->SetHandled();
++      return true;
++    }
++
++    case ui::EventType::kMouseCaptureChanged:
++      sail_drag_.reset();
++      return false;
++
++    default:
++      return false;
++  }
++}
++
++bool VideoOverlayWindowViews::HandleSailKeyEvent(ui::KeyEvent* event) {
++  if (event->type() != ui::EventType::kKeyPressed ||
++      event->IsCommandDown() || event->IsControlDown() || event->IsAltDown()) {
++    return false;
++  }
++
++  // Escape brings the window back from filling the screen, and otherwise
++  // brings the video back into its tab.
++  if (event->key_code() == ui::VKEY_ESCAPE) {
++    if (bounds_before_fill_) {
++      ToggleFillScreen();
++    } else {
++      PictureInPictureWindowManager::GetInstance()
++          ->ExitPictureInPictureViaWindowUi(
++              PictureInPictureWindowManager::UiBehavior::
++                  kCloseWindowAndFocusOpener);
++    }
++    event->SetHandled();
++    return true;
++  }
++
++  // The other keys only apply when no button has the keyboard focus.
++  if (GetFocusManager()->GetFocusedView()) {
++    return false;
++  }
++  switch (event->key_code()) {
++    case ui::VKEY_K:
++      if (!show_play_pause_button_) {
++        return false;
++      }
++      TogglePlayPause();
++      break;
++    case ui::VKEY_J:
++      if (is_live_) {
++        return false;
++      }
++      Replay10Seconds();
++      break;
++    case ui::VKEY_L:
++      if (is_live_) {
++        return false;
++      }
++      Forward10Seconds();
++      break;
++    case ui::VKEY_UP:
++    case ui::VKEY_DOWN: {
++      const double current =
++          controller_->GetMuteStatus() ? 0 : controller_->GetVolume();
++      SetSailVolume(current + (event->key_code() == ui::VKEY_UP ? 0.1 : -0.1));
++      break;
++    }
++    case ui::VKEY_M:
++      if (!toggle_mute_button_) {
++        return false;
++      }
++      if (controller_->GetMuteStatus() && controller_->GetVolume() == 0) {
++        // Muted by turning the volume all the way down: come back at half.
++        SetSailVolume(0.5);
++      } else {
++        controller_->RequestMute(!controller_->GetMuteStatus());
++      }
++      break;
++    case ui::VKEY_F:
++      ToggleFillScreen();
++      break;
++    default:
++      return false;
++  }
++  event->SetHandled();
++  return true;
++}
++
++void VideoOverlayWindowViews::ToggleFillScreen() {
++  if (bounds_before_fill_) {
++    const gfx::Rect previous = *bounds_before_fill_;
++    bounds_before_fill_.reset();
++    SetBounds(previous);
++    return;
++  }
++  const gfx::Rect work_area = GetWorkAreaForWindow();
++  if (work_area.IsEmpty()) {
++    return;
++  }
++  bounds_before_fill_ = GetBounds();
++  SetBounds(natural_size_.IsEmpty()
++                ? work_area
++                : media::ComputeLetterboxRegion(work_area, natural_size_));
++}
++
++void VideoOverlayWindowViews::SetSailVolume(double volume) {
++  volume = std::round(std::clamp(volume, 0.0, 1.0) * 100) / 100;
++  controller_->SetVolume(volume);
++  // Like Oblò: all the way down mutes, turning it up again unmutes.
++  const bool muted = controller_->GetMuteStatus();
++  if (volume == 0 && !muted) {
++    controller_->RequestMute(true);
++  } else if (volume > 0 && muted) {
++    controller_->RequestMute(false);
++  }
++}
++
++void VideoOverlayWindowViews::SettleOnScreens() {
++  if (sail_drag_ || bounds_before_fill_ || !IsVisible()) {
++    return;
++  }
++  const std::vector<gfx::Rect> rest = GetScreenAreas().rest;
++  const gfx::Rect bounds = GetBounds();
++  if (!rest.empty() && !Fits(rest, bounds)) {
++    SetBounds(ClampToScreens(rest, bounds));
++  }
++}
++
+ PlaybackImageButton*
+ VideoOverlayWindowViews::play_pause_controls_view_for_testing() const {
+   return play_pause_controls_view_;

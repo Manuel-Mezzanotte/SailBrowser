@@ -1,0 +1,171 @@
+Sail: Option-P opens picture-in-picture for the video in the active tab, and
+closes it again (also from inside the picture-in-picture window). It is in
+the Tabs menu and can be changed in the shortcut settings.
+
+--- /dev/null
++++ b/chrome/browser/ui/sail/sail_command_ids.h
+@@ -0,0 +1,16 @@
++// Copyright 2026 The Sail Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_SAIL_SAIL_COMMAND_IDS_H_
++#define CHROME_BROWSER_UI_SAIL_SAIL_COMMAND_IDS_H_
++
++// Sail's own browser commands. They live here rather than in
++// chrome/app/chrome_command_ids.h, which hundreds of files include: adding a
++// command there would recompile all of them.
++
++// Opens picture-in-picture for the video in the active tab, or closes it when
++// that tab is already in picture-in-picture (Option-P on macOS).
++#define IDC_SAIL_TOGGLE_PICTURE_IN_PICTURE 35990
++
++#endif  // CHROME_BROWSER_UI_SAIL_SAIL_COMMAND_IDS_H_
+--- a/chrome/browser/ui/browser_command_controller.cc
++++ b/chrome/browser/ui/browser_command_controller.cc
+@@ -41,6 +41,7 @@
+ #include "chrome/browser/glic/public/glic_keyed_service_factory.h"
+ #include "chrome/browser/glic/public/service/glic_instance_coordinator.h"
+ #include "chrome/browser/lifetime/application_lifetime.h"
++#include "chrome/browser/picture_in_picture/picture_in_picture_window_manager.h"
+ #include "chrome/browser/prefs/incognito_mode_prefs.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_window.h"
+@@ -80,6 +81,7 @@
+ #include "chrome/browser/ui/profiles/profile_view_utils.h"
+ #include "chrome/browser/ui/read_anything/read_anything_controller.h"
+ #include "chrome/browser/ui/read_anything/read_anything_entry_point_controller.h"
++#include "chrome/browser/ui/sail/sail_command_ids.h"
+ #include "chrome/browser/ui/side_panel/side_panel_entry_id.h"
+ #include "chrome/browser/ui/side_panel/side_panel_ui.h"
+ #include "chrome/browser/ui/singleton_tabs.h"
+@@ -135,6 +137,7 @@
+ #include "components/tabs/public/tab_interface.h"
+ #include "components/translate/core/browser/translate_manager.h"
+ #include "components/zoom/zoom_controller.h"
++#include "content/public/browser/media_session.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_entry.h"
+ #include "content/public/browser/render_frame_host.h"
+@@ -213,6 +216,22 @@
+ 
+ namespace {
+ 
++// Sail: opens picture-in-picture for the video playing in `contents`, or
++// brings the video back into the page when this tab is already in
++// picture-in-picture. Like the button in the media controls, it works when
++// the page has a single video.
++void ToggleVideoPictureInPicture(content::WebContents* contents) {
++  if (!contents) {
++    return;
++  }
++  auto* manager = PictureInPictureWindowManager::GetInstance();
++  if (manager->GetWebContents() == contents) {
++    manager->ExitPictureInPicture();
++    return;
++  }
++  content::MediaSession::Get(contents)->EnterPictureInPicture();
++}
++
+ // Ensures that - if we have not popped up an infobar to prompt the user to e.g.
+ // reload the current page - that the content pane of the browser is refocused.
+ void AppInfoDialogClosedCallback(SessionID session_id,
+@@ -1429,6 +1448,10 @@
+     case IDC_WINDOW_MUTE_SITE:
+       MuteSite(browser_);
+       break;
++    case IDC_SAIL_TOGGLE_PICTURE_IN_PICTURE:
++      ToggleVideoPictureInPicture(
++          browser_->tab_strip_model()->GetActiveWebContents());
++      break;
+     case IDC_WINDOW_PIN_TAB:
+       PinTab(browser_);
+       break;
+@@ -2092,6 +2115,8 @@
+   command_updater_->UpdateCommandEnabled(IDC_OPEN_SAFETY_HUB, true);
+ 
+   command_updater_->UpdateCommandEnabled(IDC_WINDOW_MUTE_SITE, normal_window);
++  command_updater_->UpdateCommandEnabled(IDC_SAIL_TOGGLE_PICTURE_IN_PICTURE,
++                                         true);
+   command_updater_->UpdateCommandEnabled(IDC_WINDOW_PIN_TAB, normal_window);
+   command_updater_->UpdateCommandEnabled(IDC_WINDOW_GROUP_TAB, normal_window);
+   command_updater_->UpdateCommandEnabled(IDC_WINDOW_CLOSE_TABS_TO_RIGHT,
+--- a/chrome/browser/ui/cocoa/accelerators_cocoa.mm
++++ b/chrome/browser/ui/cocoa/accelerators_cocoa.mm
+@@ -15,6 +15,7 @@
+ #include "base/memory/singleton.h"
+ #include "build/branding_buildflags.h"
+ #include "chrome/app/chrome_command_ids.h"
++#include "chrome/browser/ui/sail/sail_command_ids.h"
+ #include "printing/buildflags/buildflags.h"
+ #import "ui/base/accelerators/platform_accelerator_cocoa.h"
+ #import "ui/events/cocoa/cocoa_event_utils.h"
+@@ -58,6 +59,8 @@
+     {IDC_BOOKMARK_THIS_TAB, ui::EF_COMMAND_DOWN, ui::VKEY_D},
+     {IDC_SHOW_DOWNLOADS, ui::EF_COMMAND_DOWN | ui::EF_SHIFT_DOWN, ui::VKEY_J},
+     {IDC_SHOW_HISTORY, ui::EF_COMMAND_DOWN, ui::VKEY_Y},
++    // Sail: Option-P opens or closes picture-in-picture, as in Oblò.
++    {IDC_SAIL_TOGGLE_PICTURE_IN_PICTURE, ui::EF_ALT_DOWN, ui::VKEY_P},
+     {IDC_VIEW_SOURCE, ui::EF_COMMAND_DOWN | ui::EF_ALT_DOWN, ui::VKEY_U},
+     {IDC_ZOOM_MINUS, ui::EF_COMMAND_DOWN, ui::VKEY_OEM_MINUS},
+     // The following entry also enables "Cmd =" on US keyboards to invoke View
+--- a/chrome/browser/ui/cocoa/main_menu_builder.mm
++++ b/chrome/browser/ui/cocoa/main_menu_builder.mm
+@@ -16,6 +16,7 @@
+ #include "chrome/browser/feedback/report_unsafe_site_dialog.h"
+ #include "chrome/browser/ui/cocoa/accelerators_cocoa.h"
+ #include "chrome/browser/ui/cocoa/history_menu_bridge.h"
++#include "chrome/browser/ui/sail/sail_command_ids.h"
+ #include "chrome/browser/ui/toolbar/app_menu_model.h"
+ #include "chrome/browser/ui/ui_features.h"
+ #include "chrome/common/chrome_features.h"
+@@ -530,6 +531,9 @@
+                   .command_id(IDC_MUTE_TARGET_SITE)
+                   .is_alternate()
+                   .key_equivalent(@"", NSEventModifierFlagOption),
++              // Sail: Option-P, from the accelerator table.
++              Item(IDS_CONTENT_CONTEXT_PICTUREINPICTURE)
++                  .command_id(IDC_SAIL_TOGGLE_PICTURE_IN_PICTURE),
+               Item(IDS_PIN_TAB_MAC)
+                   .command_id(IDC_WINDOW_PIN_TAB),
+               Item(IDS_PIN_TARGET_TAB_MAC)
+--- a/chrome/browser/ui/browser_shortcuts/browser_shortcut_metadata.cc
++++ b/chrome/browser/ui/browser_shortcuts/browser_shortcut_metadata.cc
+@@ -13,6 +13,7 @@
+ #include "build/build_config.h"
+ #include "chrome/app/chrome_command_ids.h"
+ #include "chrome/browser/ui/helium/helium_layout_state_controller.h"
++#include "chrome/browser/ui/sail/sail_command_ids.h"
+ #include "chrome/common/pref_names.h"
+ #include "chrome/grit/generated_resources.h"
+ #include "components/prefs/pref_service.h"
+@@ -192,6 +193,8 @@
+       return Label(IDS_MEDIA_ROUTER_MENU_ITEM_TITLE);
+     case IDC_WINDOW_MUTE_SITE:
+       return Label(IDS_SHORTCUT_COMMAND_TOGGLE_MUTE_SITE);
++    case IDC_SAIL_TOGGLE_PICTURE_IN_PICTURE:
++      return Label(IDS_CONTENT_CONTEXT_PICTUREINPICTURE);
+     case IDC_QRCODE_GENERATOR:
+       return Label(IDS_SHARING_HUB_GENERATE_QR_CODE_LABEL);
+     case IDC_SHARING_HUB_SCREENSHOT:
+--- a/chrome/browser/ui/views/overlay/video_overlay_window_views.cc
++++ b/chrome/browser/ui/views/overlay/video_overlay_window_views.cc
+@@ -626,6 +626,18 @@
+   }
+ #endif  // BUILDFLAG(IS_WIN)
+ 
++  // Sail: Option-P, as in the browser window, brings the video back into the
++  // page and keeps it playing.
++  if (event->type() == ui::EventType::kKeyPressed &&
++      event->key_code() == ui::VKEY_P && event->IsAltDown() &&
++      !event->IsCommandDown() && !event->IsControlDown() &&
++      !event->IsShiftDown()) {
++    PictureInPictureWindowManager::GetInstance()
++        ->ExitPictureInPictureViaWindowUi(
++            PictureInPictureWindowManager::UiBehavior::kCloseWindowOnly);
++    event->SetHandled();
++  }
++
+   // If there's no focused control, then we handle certain keys as if they went
+   // to the relevant control.
+   views::View* focused_view = GetFocusManager()->GetFocusedView();

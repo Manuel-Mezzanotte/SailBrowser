@@ -1,0 +1,26 @@
+// Copyright 2026 The Sail Authors
+// You can use, redistribute, and/or modify this source code under
+// the terms of the GPL-3.0 license that can be found in the LICENSE file.
+
+CANVAS_DIMENSIONS, 256,
+NEW_PATH,
+PATH_COLOR_ARGB, 0xFF, 0x0B, 0x14, 0x26,
+ROUND_RECT, 0, 0, 256, 256, 57.6f,
+NEW_PATH,
+FILL_RULE_NONZERO,
+PATH_COLOR_ARGB, 0xFF, 0xFF, 0xFF, 0xFF,
+MOVE_TO, 75.5f, 35,
+CUBIC_TO, 79.92f, 35, 83.5f, 38.58f, 83.5f, 43,
+LINE_TO, 83.5f, 202,
+CUBIC_TO, 83.5f, 206.42f, 79.92f, 210, 75.5f, 210,
+CUBIC_TO, 71.08f, 210, 67.5f, 206.42f, 67.5f, 202,
+LINE_TO, 67.5f, 43,
+CUBIC_TO, 67.5f, 38.58f, 71.08f, 35, 75.5f, 35,
+CLOSE,
+MOVE_TO, 98.5f, 41.41f,
+QUADRATIC_TO, 98.5f, 35, 102.84f, 39.72f,
+CUBIC_TO, 143.5f, 83.9f, 177.22f, 145.7f, 192.86f, 205.62f,
+QUADRATIC_TO, 194, 210, 189.47f, 210,
+LINE_TO, 102, 210,
+QUADRATIC_TO, 98.5f, 210, 98.5f, 206.5f,
+CLOSE

@@ -41,6 +41,7 @@ ___helium_setup() {
 
     cd "$_src_dir"
     quilt push -a --refresh
+    sail_rebrand
 
     gn_gen --export-compile-commands
 }
@@ -117,8 +118,8 @@ ___helium_build() {
 }
 
 ___helium_run() {
-    "$_out_dir/Helium.app/Contents/MacOS/Helium" \
-    --user-data-dir="$HOME/Library/Application Support/net.imput.helium.dev" \
+    "$_out_dir/Sail.app/Contents/MacOS/Sail" \
+    --user-data-dir="$HOME/Library/Application Support/com.manuelmezzanotte.sail.dev" \
     --enable-ui-devtools \
     --use-mock-keychain \
     --disable-features=DialMediaRouteProvider

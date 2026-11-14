@@ -1,13 +1,17 @@
 #!/bin/bash -eux
 
 _root_dir="$(dirname "$(greadlink -f "$0")")"
-_app="out/Default/Helium.app"
-_packaging="out/Default/Helium Packaging"
+_bundle_id="com.manuelmezzanotte.sail"
+_app="out/Default/Sail.app"
+_packaging="out/Default/Sail Packaging"
+
+# Paths below are relative to the Chromium source tree.
+cd "$_root_dir/build/src"
 
 if [ -n "${MACOS_CERTIFICATE_NAME:-}" ]; then
   if [ -n "${PROD_MACOS_SPECIAL_ENTITLEMENTS_PROFILE_PATH:-}" ]; then
     # Chromium embeds this profile from its packaging inputs during signing.
-    cp "$PROD_MACOS_SPECIAL_ENTITLEMENTS_PROFILE_PATH" "$_packaging/Helium.provisionprofile"
+    cp "$PROD_MACOS_SPECIAL_ENTITLEMENTS_PROFILE_PATH" "$_packaging/Sail.provisionprofile"
   fi
 
   CREDENTIAL_ARGS=(store-credentials notarytool-profile)
@@ -30,34 +34,43 @@ if [ -n "${MACOS_CERTIFICATE_NAME:-}" ]; then
     --disable-packaging --notarize \
     "${NOTARY_ARGS[@]}"
 
-  _app="out/Default/signed/stable/Helium.app"
+  _app="out/Default/signed/stable/Sail.app"
 else
   echo "warn: MACOS_CERTIFICATE_NAME is missing; skipping notarization" >&2
-  codesign --force --deep --sign - "$_app"
+  # A local self-signed certificate gives every build the same code identity,
+  # so the keychain keeps "Always Allow" for the Sail Storage Key. Signed ad
+  # hoc, Sail looks like a new app after each build and macOS asks again.
+  _local_identity="${SAIL_LOCAL_SIGNING_IDENTITY:-Sail Local Signing}"
+  if security find-identity -p codesigning | grep -qF "\"$_local_identity\""; then
+    codesign --force --deep --sign "$_local_identity" "$_app"
+  else
+    echo "warn: no \"$_local_identity\" certificate; signing ad hoc" >&2
+    codesign --force --deep --sign - "$_app"
+  fi
 fi
 
 if [ -z "${OUT_DMG_PATH:-}" ]; then
   _chromium_version=$(cat "$_root_dir/helium-chromium/chromium_version.txt")
   _helium_revision=$(cat "$_root_dir/helium-chromium/revision.txt")
   _platform_revision=$(cat "$_root_dir/revision.txt")
-  OUT_DMG_PATH="$_root_dir/build/helium_${_chromium_version}-${_helium_revision}.${_platform_revision}_macos.dmg"
+  OUT_DMG_PATH="$_root_dir/build/sail_${_chromium_version}-${_helium_revision}.${_platform_revision}_macos.dmg"
 fi
 
 # Package the app
 chrome/installer/mac/pkg-dmg \
   --sourcefile --source "$_app" \
   --target "$OUT_DMG_PATH" \
-  --volname Helium --format ULMO \
+  --volname Sail --format ULMO \
   --icon "$_app/Contents/Resources/app.icns" \
   --symlink /Applications:/Applications \
   --mkdir .background \
-  --copy "$_root_dir/resources/dmg_background.png:/.background/dmg_background.png" \
+  --copy "$_root_dir/sail/resources/dmg_background.png:/.background/dmg_background.png" \
   --copy "$_root_dir/resources/dmg_dsstore:/.DS_Store" \
   --verbosity 2
 
 if [ -n "${MACOS_CERTIFICATE_NAME:-}" ]; then
   codesign \
     --sign "$MACOS_CERTIFICATE_NAME" \
-    --identifier net.imput.helium --force \
+    --identifier "$_bundle_id" --force \
     "$OUT_DMG_PATH"
 fi

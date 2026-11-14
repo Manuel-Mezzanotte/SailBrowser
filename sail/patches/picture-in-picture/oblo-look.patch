@@ -1,0 +1,2095 @@
+Sail: the picture-in-picture window looks like Oblò. Glass pills at the top
+(close and back to the tab at the left, the volume at the right, whose slider
+drops down under the mouse), big play and ten-second buttons in the middle,
+and the elapsed time, a thin rail and the remaining time at the bottom, or a
+"live" badge. Everything grows with the window. The origin and favicon at the
+top are gone; the controls stay while the video is paused or the mouse is on
+one of them, and the cursor hides with them. On the Mac the window has
+round corners.
+
+--- a/chrome/browser/ui/views/overlay/BUILD.gn
++++ b/chrome/browser/ui/views/overlay/BUILD.gn
+@@ -64,6 +64,8 @@
+     "overlay_window_live_caption_dialog.cc",
+     "playback_image_button.cc",
+     "resize_handle_button.cc",
++    "sail_oblo_controls.cc",
++    "sail_oblo_controls.h",
+     "simple_overlay_window_image_button.cc",
+     "skip_ad_label_button.cc",
+     "toggle_camera_button.cc",
+@@ -74,6 +76,8 @@
+ 
+   deps = [
+     ":overlay",
++    "//base:i18n",
++    "//cc/paint",
+     "//chrome/browser/media",
+     "//chrome/browser/ui:browser_init_state",
+     "//chrome/browser/ui/color:color_headers",
+--- a/chrome/browser/ui/views/overlay/overlay_controls_fade_animation.cc
++++ b/chrome/browser/ui/views/overlay/overlay_controls_fade_animation.cc
+@@ -5,11 +5,13 @@
+ #include "chrome/browser/ui/views/overlay/overlay_controls_fade_animation.h"
+ 
+ #include "ui/compositor/layer.h"
++#include "ui/gfx/geometry/cubic_bezier.h"
+ #include "ui/views/view.h"
+ 
+ namespace {
+ 
+-constexpr base::TimeDelta kDuration = base::Milliseconds(250);
++// Sail: Oblò's fade, .4s cubic-bezier(.2, .8, .2, 1).
++constexpr base::TimeDelta kDuration = base::Milliseconds(400);
+ 
+ }  // namespace
+ 
+@@ -23,6 +25,7 @@
+ OverlayControlsFadeAnimation::~OverlayControlsFadeAnimation() = default;
+ 
+ void OverlayControlsFadeAnimation::AnimateToState(double state) {
++  state = gfx::CubicBezier(0.2, 0.8, 0.2, 1).Solve(state);
+   const double opacity = (type_ == Type::kToShown) ? state : (1.0 - state);
+   for (auto& control : controls_) {
+     control->SetVisible(opacity != 0);
+--- /dev/null
++++ b/chrome/browser/ui/views/overlay/sail_oblo_controls.h
+@@ -0,0 +1,291 @@
++// Copyright 2026 The Sail Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_VIEWS_OVERLAY_SAIL_OBLO_CONTROLS_H_
++#define CHROME_BROWSER_UI_VIEWS_OVERLAY_SAIL_OBLO_CONTROLS_H_
++
++#include <memory>
++#include <string>
++#include <vector>
++
++#include "base/functional/callback.h"
++#include "base/memory/raw_ptr.h"
++#include "base/time/time.h"
++#include "base/timer/timer.h"
++#include "ui/base/metadata/metadata_header_macros.h"
++#include "ui/gfx/animation/animation_delegate.h"
++#include "ui/gfx/animation/slide_animation.h"
++#include "ui/gfx/font_list.h"
++#include "ui/gfx/geometry/size.h"
++#include "ui/views/background.h"
++#include "ui/views/controls/button/button.h"
++#include "ui/views/view.h"
++
++namespace views {
++class Label;
++}  // namespace views
++
++// Sail: the controls of the picture-in-picture window, drawn like Oblò, the
++// picture-in-picture window Sail's author made for Zen: glass pills, icons in
++// the style of SF Symbols, a big play button, a thin progress rail and a
++// volume slider that drops down from the speaker.
++namespace sail_oblo {
++
++enum class Icon {
++  kPlay,
++  kPause,
++  kBack,
++  kForward,
++  kClose,
++  kReturnToTab,
++  kVolume1,
++  kVolume2,
++  kVolume3,
++  kMuted,
++};
++
++// The speaker for `level`, from 0 (muted) to 1.
++Icon VolumeIcon(double level);
++
++// Oblò's sizes, which grow with the window like its CSS did (vmin, a
++// hundredth of the shorter side).
++struct Metrics {
++  explicit Metrics(const gfx::Size& window);
++
++  // Small windows drop the seek buttons and the times.
++  bool small;
++  // Distance of the top controls from the window edges.
++  int edge;
++  // Distance of the bottom row from the sides and from the bottom.
++  int bottom_side;
++  int bottom_edge;
++  // Top buttons, and the icons in them.
++  int button;
++  int glyph;
++  // Icons of the center buttons, and the space around and between them.
++  int play;
++  int skip;
++  int center_padding;
++  int center_gap;
++  // Progress rail: thickness, thickness under the mouse, height of the area
++  // that takes the mouse.
++  int rail;
++  int rail_hover;
++  int track;
++  // Height of the volume slider.
++  int volume;
++  // Space between the times and the rail, and the size of the times.
++  int bottom_gap;
++  int time_font;
++};
++
++// Round button that draws one of Oblò's icons, with a white wash under the
++// mouse.
++class IconButton : public views::Button {
++  METADATA_HEADER(IconButton, views::Button)
++
++ public:
++  IconButton(PressedCallback callback, Icon icon, const std::u16string& label);
++  IconButton(const IconButton&) = delete;
++  IconButton& operator=(const IconButton&) = delete;
++  ~IconButton() override;
++
++  void SetIcon(Icon icon, const std::u16string& label);
++  // The size of the icon; the button itself may be bigger.
++  void SetGlyphSize(int glyph_size);
++  // The buttons in the middle of the video: no glass around them, a softer
++  // wash and a shadow under the icon.
++  void SetCenterStyle(bool center);
++
++  // views::Button:
++  void PaintButtonContents(gfx::Canvas* canvas) override;
++  ui::Cursor GetCursor(const ui::MouseEvent& event) override;
++
++ private:
++  Icon icon_;
++  int glyph_size_ = 18;
++  bool center_ = false;
++};
++
++// The translucent, blurred pill behind the top buttons.
++class GlassPill : public views::View {
++  METADATA_HEADER(GlassPill, views::View)
++
++ public:
++  GlassPill();
++  GlassPill(const GlassPill&) = delete;
++  GlassPill& operator=(const GlassPill&) = delete;
++  ~GlassPill() override;
++
++  // Puts the visible children in a row of `button`-sized squares and sizes
++  // the pill around them.
++  void LayOutRow(int button);
++
++  // views::View:
++  void OnBoundsChanged(const gfx::Rect& previous_bounds) override;
++  void OnPaint(gfx::Canvas* canvas) override;
++};
++
++// The speaker at the top right. Under the mouse a slider drops down from it;
++// a click mutes or unmutes and the wheel turns the volume up and down.
++class VolumeControl : public GlassPill, public gfx::AnimationDelegate {
++  METADATA_HEADER(VolumeControl, GlassPill)
++
++ public:
++  using LevelCallback = base::RepeatingCallback<void(double level)>;
++
++  VolumeControl(views::Button::PressedCallback mute_callback,
++                LevelCallback level_callback,
++                const std::u16string& label);
++  VolumeControl(const VolumeControl&) = delete;
++  VolumeControl& operator=(const VolumeControl&) = delete;
++  ~VolumeControl() override;
++
++  // The level shown, from 0 (muted) to 1.
++  void SetLevel(double level, const std::u16string& label);
++  void SetSizes(int button, int slider, int glyph);
++  // The view that paints the pill's shadow, repainted as the pill grows.
++  void SetShadowView(views::View* view);
++  // Opens the slider for a moment, for the keyboard.
++  void Peek();
++  // True while the mouse is on it, the slider is dragged or it is peeking.
++  bool IsBusy() const;
++
++  // views::View:
++  void OnMouseEntered(const ui::MouseEvent& event) override;
++  void OnMouseExited(const ui::MouseEvent& event) override;
++  void OnMouseMoved(const ui::MouseEvent& event) override;
++  bool OnMousePressed(const ui::MouseEvent& event) override;
++  bool OnMouseDragged(const ui::MouseEvent& event) override;
++  void OnMouseReleased(const ui::MouseEvent& event) override;
++  void OnMouseCaptureLost() override;
++  bool OnMouseWheel(const ui::MouseWheelEvent& event) override;
++  void OnPaint(gfx::Canvas* canvas) override;
++  ui::Cursor GetCursor(const ui::MouseEvent& event) override;
++  void VisibilityChanged(views::View* starting_from, bool is_visible) override;
++
++  // gfx::AnimationDelegate:
++  void AnimationProgressed(const gfx::Animation* animation) override;
++  void AnimationEnded(const gfx::Animation* animation) override;
++
++ private:
++  void UpdateOpen();
++  void UpdateSize();
++  bool InSlider(const gfx::Point& point) const;
++  gfx::RectF RailBounds() const;
++  double LevelAt(int y) const;
++
++  LevelCallback level_callback_;
++  raw_ptr<IconButton> mute_button_ = nullptr;
++  raw_ptr<views::View> shadow_view_ = nullptr;
++  double level_ = 1;
++  int button_ = 32;
++  int slider_ = 100;
++  bool hovered_ = false;
++  bool rail_hovered_ = false;
++  bool dragging_ = false;
++  bool peeking_ = false;
++  gfx::SlideAnimation open_animation_{this};
++  base::OneShotTimer peek_timer_;
++};
++
++// The progress rail. It thickens under the mouse; pressing or dragging on it
++// moves the playhead, and the video seeks when the mouse is let go.
++class ProgressRail : public views::View, public gfx::AnimationDelegate {
++  METADATA_HEADER(ProgressRail, views::View)
++
++ public:
++  // Called while scrubbing with `done` false, and once more with `done` true
++  // when the mouse is let go.
++  using ScrubCallback =
++      base::RepeatingCallback<void(double fraction, bool done)>;
++
++  explicit ProgressRail(ScrubCallback callback);
++  ProgressRail(const ProgressRail&) = delete;
++  ProgressRail& operator=(const ProgressRail&) = delete;
++  ~ProgressRail() override;
++
++  // Ignored while scrubbing.
++  void SetFraction(double fraction);
++  double fraction() const { return fraction_; }
++  bool scrubbing() const { return scrubbing_; }
++  void SetRailHeights(int rail, int hover_rail);
++
++  // views::View:
++  void OnPaint(gfx::Canvas* canvas) override;
++  void OnMouseEntered(const ui::MouseEvent& event) override;
++  void OnMouseExited(const ui::MouseEvent& event) override;
++  bool OnMousePressed(const ui::MouseEvent& event) override;
++  bool OnMouseDragged(const ui::MouseEvent& event) override;
++  void OnMouseReleased(const ui::MouseEvent& event) override;
++  void OnMouseCaptureLost() override;
++  ui::Cursor GetCursor(const ui::MouseEvent& event) override;
++  void VisibilityChanged(views::View* starting_from, bool is_visible) override;
++
++  // gfx::AnimationDelegate:
++  void AnimationProgressed(const gfx::Animation* animation) override;
++
++ private:
++  double FractionAt(int x) const;
++  void EndScrub();
++
++  ScrubCallback callback_;
++  double fraction_ = 0;
++  int rail_ = 5;
++  int hover_rail_ = 9;
++  bool scrubbing_ = false;
++  gfx::SlideAnimation hover_animation_{this};
++};
++
++// "LIVE" in a glass pill with a red dot, in place of the progress rail.
++class LiveBadge : public GlassPill {
++  METADATA_HEADER(LiveBadge, GlassPill)
++
++ public:
++  explicit LiveBadge(const std::u16string& text);
++  LiveBadge(const LiveBadge&) = delete;
++  LiveBadge& operator=(const LiveBadge&) = delete;
++  ~LiveBadge() override;
++
++  gfx::Size GetBadgeSize() const;
++
++  // views::View:
++  void OnBoundsChanged(const gfx::Rect& previous_bounds) override;
++  void OnPaint(gfx::Canvas* canvas) override;
++
++ private:
++  raw_ptr<views::Label> label_ = nullptr;
++};
++
++// The soft shadow around the glass pills. It is painted outside them only,
++// so it does not darken the glass.
++class PillShadows : public views::Background {
++ public:
++  explicit PillShadows(std::vector<raw_ptr<views::View>> pills);
++  PillShadows(const PillShadows&) = delete;
++  PillShadows& operator=(const PillShadows&) = delete;
++  ~PillShadows() override;
++
++  // views::Background:
++  void Paint(gfx::Canvas* canvas, views::View* view) const override;
++
++ private:
++  std::vector<raw_ptr<views::View>> pills_;
++};
++
++// The shade over the video while the controls are shown: darker at the top
++// and at the bottom, clear in the middle.
++std::unique_ptr<views::Background> CreateShadeBackground();
++
++// The elapsed and remaining times at the sides of the rail.
++void StyleTimeLabel(views::Label* label, bool end);
++gfx::FontList TimeFont(int size);
++std::u16string FormatTime(base::TimeDelta time);
++// The longest text the times take for a video of `duration`, with every digit
++// a zero, so that the rail does not move as the digits change.
++std::u16string TimeTemplate(base::TimeDelta duration);
++
++}  // namespace sail_oblo
++
++#endif  // CHROME_BROWSER_UI_VIEWS_OVERLAY_SAIL_OBLO_CONTROLS_H_
+--- /dev/null
++++ b/chrome/browser/ui/views/overlay/sail_oblo_controls.cc
+@@ -0,0 +1,994 @@
++// Copyright 2026 The Sail Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#include "chrome/browser/ui/views/overlay/sail_oblo_controls.h"
++
++#include <algorithm>
++#include <cmath>
++#include <string_view>
++#include <utility>
++
++#include "base/i18n/case_conversion.h"
++#include "base/numerics/safe_conversions.h"
++#include "base/strings/string_util.h"
++#include "base/strings/stringprintf.h"
++#include "base/strings/utf_string_conversions.h"
++#include "cc/paint/paint_canvas.h"
++#include "cc/paint/paint_filter.h"
++#include "cc/paint/paint_flags.h"
++#include "cc/paint/paint_shader.h"
++#include "third_party/skia/include/core/SkPath.h"
++#include "third_party/skia/include/core/SkPathBuilder.h"
++#include "third_party/skia/include/core/SkRRect.h"
++#include "ui/base/cursor/cursor.h"
++#include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/compositor/layer.h"
++#include "ui/events/event.h"
++#include "ui/gfx/canvas.h"
++#include "ui/gfx/font.h"
++#include "ui/gfx/geometry/cubic_bezier.h"
++#include "ui/gfx/geometry/rect_f.h"
++#include "ui/gfx/geometry/rounded_corners_f.h"
++#include "ui/gfx/geometry/skia_conversions.h"
++#include "ui/gfx/scoped_canvas.h"
++#include "ui/gfx/shadow_value.h"
++#include "ui/gfx/text_utils.h"
++#include "ui/views/accessibility/view_accessibility.h"
++#include "ui/views/controls/button/button_controller.h"
++#include "ui/views/controls/highlight_path_generator.h"
++#include "ui/views/controls/label.h"
++
++namespace sail_oblo {
++
++namespace {
++
++// Oblò's colors.
++constexpr SkColor kIconColor = SkColorSetARGB(235, 255, 255, 255);
++constexpr SkColor kGlassColor = SkColorSetARGB(117, 44, 44, 46);
++constexpr SkColor kHairlineColor = SkColorSetARGB(41, 255, 255, 255);
++constexpr SkColor kRailColor = SkColorSetARGB(61, 255, 255, 255);
++constexpr SkColor kPlayedColor = SkColorSetARGB(245, 255, 255, 255);
++constexpr SkColor kVolumeRailColor = SkColorSetARGB(56, 255, 255, 255);
++constexpr SkColor kTimeColor = SkColorSetARGB(209, 255, 255, 255);
++constexpr SkColor kLiveColor = SkColorSetRGB(255, 69, 58);
++
++// backdrop-filter: blur(22px).
++constexpr float kGlassBlur = 22;
++// Padding inside a pill and space between its buttons.
++constexpr int kPillPadding = 3;
++constexpr int kPillGap = 2;
++
++// The icons are drawn on a 24 by 24 grid, like Oblò's SVGs.
++constexpr float kIconGrid = 24;
++
++// Oblò's easing, cubic-bezier(.2, .8, .2, 1).
++double Ease(double t) {
++  return gfx::CubicBezier(0.2, 0.8, 0.2, 1).Solve(t);
++}
++
++int Clamp(double value, int min, int max) {
++  return std::clamp(base::ClampRound(value), min, max);
++}
++
++cc::PaintFlags Fill(SkColor color) {
++  cc::PaintFlags flags;
++  flags.setAntiAlias(true);
++  flags.setStyle(cc::PaintFlags::kFill_Style);
++  flags.setColor(color);
++  return flags;
++}
++
++cc::PaintFlags Stroke(SkColor color, float width) {
++  cc::PaintFlags flags = Fill(color);
++  flags.setStyle(cc::PaintFlags::kStroke_Style);
++  flags.setStrokeWidth(width);
++  flags.setStrokeCap(cc::PaintFlags::kRound_Cap);
++  flags.setStrokeJoin(cc::PaintFlags::kRound_Join);
++  return flags;
++}
++
++// Reads the SVG path data of Oblò's icons: M, L, H, V, C, A and Z, absolute
++// or relative, with the numbers written as compactly as SVG allows.
++SkPath ParseSvgPath(std::string_view d) {
++  SkPathBuilder builder;
++  size_t i = 0;
++  const auto skip = [&] {
++    while (i < d.size() && (d[i] == ' ' || d[i] == ',')) {
++      ++i;
++    }
++  };
++  const auto number = [&](float& out) {
++    skip();
++    size_t j = i;
++    bool negative = false;
++    if (j < d.size() && (d[j] == '-' || d[j] == '+')) {
++      negative = d[j] == '-';
++      ++j;
++    }
++    double value = 0;
++    bool digits = false;
++    while (j < d.size() && base::IsAsciiDigit(d[j])) {
++      value = value * 10 + (d[j] - '0');
++      digits = true;
++      ++j;
++    }
++    if (j < d.size() && d[j] == '.') {
++      ++j;
++      double scale = 0.1;
++      while (j < d.size() && base::IsAsciiDigit(d[j])) {
++        value += (d[j] - '0') * scale;
++        scale /= 10;
++        digits = true;
++        ++j;
++      }
++    }
++    if (!digits) {
++      return false;
++    }
++    i = j;
++    out = static_cast<float>(negative ? -value : value);
++    return true;
++  };
++  const auto flag = [&](bool& out) {
++    skip();
++    if (i >= d.size() || (d[i] != '0' && d[i] != '1')) {
++      return false;
++    }
++    out = d[i++] == '1';
++    return true;
++  };
++
++  char command = 0;
++  SkPoint current = {0, 0};
++  SkPoint start = {0, 0};
++  while (true) {
++    skip();
++    if (i >= d.size()) {
++      break;
++    }
++    if (base::IsAsciiAlpha(d[i])) {
++      command = d[i++];
++    } else if (!command) {
++      break;
++    }
++    const SkPoint origin =
++        base::IsAsciiLower(command) ? current : SkPoint{0, 0};
++    switch (base::ToUpperASCII(command)) {
++      case 'M': {
++        float x, y;
++        if (!number(x) || !number(y)) {
++          return builder.detach();
++        }
++        current = origin + SkVector{x, y};
++        start = current;
++        builder.moveTo(current);
++        // More pairs after a move are lines.
++        command = base::IsAsciiLower(command) ? 'l' : 'L';
++        break;
++      }
++      case 'L': {
++        float x, y;
++        if (!number(x) || !number(y)) {
++          return builder.detach();
++        }
++        current = origin + SkVector{x, y};
++        builder.lineTo(current);
++        break;
++      }
++      case 'H': {
++        float x;
++        if (!number(x)) {
++          return builder.detach();
++        }
++        current.fX = origin.fX + x;
++        builder.lineTo(current);
++        break;
++      }
++      case 'V': {
++        float y;
++        if (!number(y)) {
++          return builder.detach();
++        }
++        current.fY = origin.fY + y;
++        builder.lineTo(current);
++        break;
++      }
++      case 'C': {
++        float x1, y1, x2, y2, x, y;
++        if (!number(x1) || !number(y1) || !number(x2) || !number(y2) ||
++            !number(x) || !number(y)) {
++          return builder.detach();
++        }
++        builder.cubicTo(origin + SkVector{x1, y1}, origin + SkVector{x2, y2},
++                        origin + SkVector{x, y});
++        current = origin + SkVector{x, y};
++        break;
++      }
++      case 'A': {
++        float rx, ry, rotation, x, y;
++        bool large, sweep;
++        if (!number(rx) || !number(ry) || !number(rotation) || !flag(large) ||
++            !flag(sweep) || !number(x) || !number(y)) {
++          return builder.detach();
++        }
++        const SkPoint end = origin + SkVector{x, y};
++        // SVG's sweep flag 1 is clockwise.
++        builder.arcTo({rx, ry}, rotation,
++                      large ? SkPathBuilder::kLarge_ArcSize
++                            : SkPathBuilder::kSmall_ArcSize,
++                      sweep ? SkPathDirection::kCW : SkPathDirection::kCCW,
++                      end);
++        current = end;
++        break;
++      }
++      case 'Z':
++        builder.close();
++        current = start;
++        command = 0;
++        break;
++      default:
++        return builder.detach();
++    }
++  }
++  return builder.detach();
++}
++
++void FillPath(gfx::Canvas* canvas, std::string_view d, SkColor color) {
++  canvas->DrawPath(ParseSvgPath(d), Fill(color));
++}
++
++void StrokePath(gfx::Canvas* canvas,
++                std::string_view d,
++                float width,
++                SkColor color) {
++  canvas->DrawPath(ParseSvgPath(d), Stroke(color, width));
++}
++
++void PaintSpeaker(gfx::Canvas* canvas, SkColor color) {
++  FillPath(canvas,
++           "M3.5 9.4h2.8l4.1-3.5c.6-.5 1.5-.1 1.5.7v10.8c0 .8-.9 1.2-1.5.7"
++           "l-4.1-3.5H3.5a1 1 0 0 1-1-1V10.4a1 1 0 0 1 1-1z",
++           color);
++}
++
++void PaintWaves(gfx::Canvas* canvas, int waves, SkColor color) {
++  static constexpr const char* kWaves[] = {
++      "M14.6 9.6a3.4 3.4 0 0 1 0 4.8",
++      "M17 7.4a6.6 6.6 0 0 1 0 9.2",
++      "M19.4 5.2a9.8 9.8 0 0 1 0 13.6",
++  };
++  for (int wave = 0; wave < waves; ++wave) {
++    StrokePath(canvas, kWaves[wave], 1.7f, color);
++  }
++}
++
++// The "10" inside the seek arrows. It is drawn at the icon's real size, not
++// on the scaled grid, so that the text stays sharp.
++void PaintTen(gfx::Canvas* canvas, const gfx::RectF& bounds, SkColor color) {
++  const float scale = bounds.width() / kIconGrid;
++  const gfx::FontList base;
++  const int size = std::max(1, base::ClampRound(7 * scale));
++  const gfx::FontList font = base.Derive(size - base.GetFontSize(),
++                                         gfx::Font::NORMAL,
++                                         gfx::Font::Weight::BOLD);
++  // In the SVG the text sits on a baseline at y = 15.1, centered on x = 12.
++  const int baseline = base::ClampRound(bounds.y() + 15.1f * scale);
++  const gfx::Rect rect(base::ClampFloor(bounds.x()),
++                       baseline - font.GetBaseline(),
++                       base::ClampCeil(bounds.width()), font.GetHeight());
++  canvas->DrawStringRectWithFlags(
++      u"10", font, color, rect,
++      gfx::Canvas::TEXT_ALIGN_CENTER | gfx::Canvas::NO_SUBPIXEL_RENDERING);
++}
++
++// Paints `icon` in the square `bounds`.
++void PaintIcon(gfx::Canvas* canvas,
++               Icon icon,
++               const gfx::RectF& bounds,
++               SkColor color) {
++  {
++    gfx::ScopedCanvas scoped(canvas);
++    const float scale = bounds.width() / kIconGrid;
++    canvas->sk_canvas()->translate(bounds.x(), bounds.y());
++    canvas->sk_canvas()->scale(scale, scale);
++    switch (icon) {
++      case Icon::kPlay:
++        FillPath(canvas,
++                 "M7.2 4.9v14.2c0 1 1.1 1.6 1.9 1.1l11.3-7.1c.8-.5.8-1.7 "
++                 "0-2.2L9.1 3.8c-.8-.5-1.9.1-1.9 1.1z",
++                 color);
++        break;
++      case Icon::kPause:
++        canvas->DrawRoundRect(gfx::RectF(6, 4.5f, 4.2f, 15), 1.4f,
++                              Fill(color));
++        canvas->DrawRoundRect(gfx::RectF(13.8f, 4.5f, 4.2f, 15), 1.4f,
++                              Fill(color));
++        break;
++      case Icon::kBack:
++        StrokePath(canvas, "M12 4.6a7.6 7.6 0 1 1-7.6 7.6", 2, color);
++        FillPath(canvas, "M12.7 1.8 8.8 4.6l3.9 2.8z", color);
++        break;
++      case Icon::kForward:
++        StrokePath(canvas, "M12 4.6a7.6 7.6 0 1 0 7.6 7.6", 2, color);
++        FillPath(canvas, "M11.3 1.8l3.9 2.8-3.9 2.8z", color);
++        break;
++      case Icon::kClose:
++        StrokePath(canvas, "M7 7l10 10M17 7 7 17", 2.1f, color);
++        break;
++      case Icon::kReturnToTab:
++        canvas->DrawRoundRect(gfx::RectF(2.5f, 4.5f, 19, 15), 3,
++                              Stroke(color, 1.7f));
++        StrokePath(canvas, "M15.5 15.5 9 9M9 13V9h4", 1.8f, color);
++        break;
++      case Icon::kVolume1:
++      case Icon::kVolume2:
++      case Icon::kVolume3:
++        PaintSpeaker(canvas, color);
++        PaintWaves(canvas,
++                   icon == Icon::kVolume1   ? 1
++                   : icon == Icon::kVolume2 ? 2
++                                            : 3,
++                   color);
++        break;
++      case Icon::kMuted:
++        PaintSpeaker(canvas, color);
++        StrokePath(canvas, "M15.6 9.6l4.8 4.8M20.4 9.6l-4.8 4.8", 1.8f, color);
++        break;
++    }
++  }
++  if (icon == Icon::kBack || icon == Icon::kForward) {
++    PaintTen(canvas, bounds, color);
++  }
++}
++
++class ShadeBackground : public views::Background {
++ public:
++  ShadeBackground() = default;
++  ShadeBackground(const ShadeBackground&) = delete;
++  ShadeBackground& operator=(const ShadeBackground&) = delete;
++  ~ShadeBackground() override = default;
++
++  // views::Background:
++  void Paint(gfx::Canvas* canvas, views::View* view) const override {
++    const gfx::Rect bounds = view->GetLocalBounds();
++    const SkPoint points[2] = {SkPoint::Make(0, bounds.y()),
++                               SkPoint::Make(0, bounds.bottom())};
++    // linear-gradient(to bottom, rgba(0,0,0,.45), rgba(0,0,0,0) 34%,
++    //                 rgba(0,0,0,0) 58%, rgba(0,0,0,.55))
++    const SkColor4f colors[4] = {
++        {0, 0, 0, 0.45f}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0.55f}};
++    const SkScalar positions[4] = {0, 0.34f, 0.58f, 1};
++    cc::PaintFlags flags;
++    flags.setShader(cc::PaintShader::MakeLinearGradient(
++        points, colors, positions, 4, SkTileMode::kClamp));
++    canvas->DrawRect(bounds, flags);
++  }
++};
++
++}  // namespace
++
++Icon VolumeIcon(double level) {
++  if (level <= 0) {
++    return Icon::kMuted;
++  }
++  if (level < 0.34) {
++    return Icon::kVolume1;
++  }
++  return level < 0.67 ? Icon::kVolume2 : Icon::kVolume3;
++}
++
++Metrics::Metrics(const gfx::Size& window) {
++  const double vmin = std::min(window.width(), window.height()) / 100.0;
++  small = window.height() <= 170 || window.width() <= 280;
++  edge = small ? 6 : Clamp(2.4 * vmin, 10, 18);
++  bottom_side = small ? 8 : edge + 4;
++  bottom_edge = small ? 6 : edge;
++  button = Clamp(7 * vmin, 28, 44);
++  glyph = Clamp(3.8 * vmin, 16, 24);
++  play = Clamp(15 * vmin, 32, 112);
++  skip = Clamp(9.5 * vmin, 22, 70);
++  center_padding = Clamp(1.8 * vmin, 6, 14);
++  center_gap = Clamp(10 * vmin, 14, 90);
++  rail = Clamp(vmin, 5, 7);
++  rail_hover = Clamp(1.7 * vmin, 9, 12);
++  track = Clamp(4 * vmin, 18, 26);
++  volume = Clamp(24 * vmin, 64, 132);
++  bottom_gap = Clamp(1.8 * vmin, 8, 14);
++  time_font = Clamp(2.2 * vmin, 11, 14);
++}
++
++// IconButton ------------------------------------------------------------------
++
++IconButton::IconButton(PressedCallback callback,
++                       Icon icon,
++                       const std::u16string& label)
++    : views::Button(std::move(callback)), icon_(icon) {
++  // Act as soon as the button is pressed, like the media controls of macOS:
++  // the release can be lost while the picture-in-picture window becomes the
++  // active window, which left the button pressed without doing anything.
++  button_controller()->set_notify_action(
++      views::ButtonController::NotifyAction::kOnPress);
++  SetAnimationDuration(base::Milliseconds(200));
++  views::InstallCircleHighlightPathGenerator(this);
++  GetViewAccessibility().SetName(label);
++  SetTooltipText(label);
++}
++
++IconButton::~IconButton() = default;
++
++void IconButton::SetIcon(Icon icon, const std::u16string& label) {
++  if (icon != icon_) {
++    icon_ = icon;
++    SchedulePaint();
++  }
++  if (label != GetTooltipText()) {
++    GetViewAccessibility().SetName(label);
++    SetTooltipText(label);
++  }
++}
++
++void IconButton::SetGlyphSize(int glyph_size) {
++  if (glyph_size == glyph_size_) {
++    return;
++  }
++  glyph_size_ = glyph_size;
++  SchedulePaint();
++}
++
++void IconButton::SetCenterStyle(bool center) {
++  center_ = center;
++  SchedulePaint();
++}
++
++void IconButton::PaintButtonContents(gfx::Canvas* canvas) {
++  const gfx::RectF bounds(GetLocalBounds());
++  const double hover = GetEnabled() ? hover_animation().GetCurrentValue() : 0;
++
++  // background: rgba(255,255,255,.14) under the mouse, .1 for the center.
++  const double wash = hover * (center_ ? 0.10 : 0.14);
++  if (wash > 0) {
++    canvas->DrawCircle(
++        bounds.CenterPoint(), std::min(bounds.width(), bounds.height()) / 2,
++        Fill(SkColorSetA(SK_ColorWHITE, base::ClampRound(wash * 255))));
++  }
++
++  gfx::ScopedCanvas scoped(canvas);
++  // transform: scale(.88) while pressed.
++  if (GetState() == STATE_PRESSED) {
++    const gfx::PointF center = bounds.CenterPoint();
++    canvas->sk_canvas()->translate(center.x(), center.y());
++    canvas->sk_canvas()->scale(0.88f, 0.88f);
++    canvas->sk_canvas()->translate(-center.x(), -center.y());
++  }
++
++  // rgba(255,255,255,.92), white under the mouse.
++  const SkColor color = SkColorSetA(
++      kIconColor, SkColorGetA(kIconColor) +
++                      base::ClampRound((255 - SkColorGetA(kIconColor)) * hover));
++  const gfx::RectF glyph(bounds.CenterPoint().x() - glyph_size_ / 2.f,
++                         bounds.CenterPoint().y() - glyph_size_ / 2.f,
++                         glyph_size_, glyph_size_);
++  if (!center_) {
++    PaintIcon(canvas, icon_, glyph, color);
++    return;
++  }
++  // filter: drop-shadow(0 1px 8px rgba(0,0,0,.4)).
++  cc::PaintFlags shadow;
++  shadow.setImageFilter(sk_make_sp<cc::DropShadowPaintFilter>(
++      0, 1, 4, 4, SkColor4f{0, 0, 0, 0.4f},
++      cc::DropShadowPaintFilter::ShadowMode::kDrawShadowAndForeground,
++      nullptr));
++  canvas->sk_canvas()->saveLayer(shadow);
++  PaintIcon(canvas, icon_, glyph, color);
++  canvas->sk_canvas()->restore();
++}
++
++ui::Cursor IconButton::GetCursor(const ui::MouseEvent& event) {
++  return ui::mojom::CursorType::kHand;
++}
++
++BEGIN_METADATA(IconButton)
++END_METADATA
++
++// GlassPill -------------------------------------------------------------------
++
++GlassPill::GlassPill() {
++  SetPaintToLayer();
++  layer()->SetFillsBoundsOpaquely(false);
++  layer()->SetBackgroundBlur(kGlassBlur);
++  layer()->SetIsFastRoundedCorner(true);
++}
++
++GlassPill::~GlassPill() = default;
++
++void GlassPill::LayOutRow(int button) {
++  int x = kPillPadding;
++  for (views::View* child : children()) {
++    if (!child->GetVisible()) {
++      continue;
++    }
++    child->SetBounds(x, kPillPadding, button, button);
++    x += button + kPillGap;
++  }
++  SetSize({std::max(x - kPillGap, kPillPadding) + kPillPadding,
++           button + 2 * kPillPadding});
++}
++
++void GlassPill::OnBoundsChanged(const gfx::Rect& previous_bounds) {
++  // border-radius: 999px.
++  layer()->SetRoundedCornerRadius(
++      gfx::RoundedCornersF(std::min(width(), height()) / 2.f));
++}
++
++void GlassPill::OnPaint(gfx::Canvas* canvas) {
++  const gfx::RectF bounds(GetLocalBounds());
++  const float radius = std::min(bounds.width(), bounds.height()) / 2;
++  canvas->DrawRoundRect(bounds, radius, Fill(kGlassColor));
++  // box-shadow: inset 0 0 0 .5px rgba(255,255,255,.16).
++  gfx::RectF hairline = bounds;
++  hairline.Inset(0.25f);
++  canvas->DrawRoundRect(hairline, std::max(0.f, radius - 0.25f),
++                        Stroke(kHairlineColor, 0.5f));
++}
++
++BEGIN_METADATA(GlassPill)
++END_METADATA
++
++// VolumeControl ---------------------------------------------------------------
++
++VolumeControl::VolumeControl(views::Button::PressedCallback mute_callback,
++                             LevelCallback level_callback,
++                             const std::u16string& label)
++    : level_callback_(std::move(level_callback)) {
++  SetNotifyEnterExitOnChild(true);
++  mute_button_ = AddChildView(std::make_unique<IconButton>(
++      std::move(mute_callback), Icon::kVolume3, label));
++  // transition: height .34s cubic-bezier(.2, .8, .2, 1).
++  open_animation_.SetSlideDuration(base::Milliseconds(340));
++  open_animation_.SetTweenType(gfx::Tween::LINEAR);
++}
++
++VolumeControl::~VolumeControl() = default;
++
++void VolumeControl::SetLevel(double level, const std::u16string& label) {
++  level_ = std::clamp(level, 0.0, 1.0);
++  mute_button_->SetIcon(VolumeIcon(level_), label);
++  SchedulePaint();
++}
++
++void VolumeControl::SetSizes(int button, int slider, int glyph) {
++  button_ = button;
++  slider_ = slider;
++  mute_button_->SetGlyphSize(glyph);
++  mute_button_->SetBounds(kPillPadding, kPillPadding, button, button);
++  UpdateSize();
++}
++
++void VolumeControl::SetShadowView(views::View* view) {
++  shadow_view_ = view;
++}
++
++void VolumeControl::Peek() {
++  peeking_ = true;
++  peek_timer_.Start(FROM_HERE, base::Milliseconds(1200),
++                    base::BindOnce(
++                        [](VolumeControl* control) {
++                          control->peeking_ = false;
++                          control->UpdateOpen();
++                        },
++                        base::Unretained(this)));
++  UpdateOpen();
++}
++
++bool VolumeControl::IsBusy() const {
++  return hovered_ || dragging_ || peeking_;
++}
++
++void VolumeControl::OnMouseEntered(const ui::MouseEvent& event) {
++  hovered_ = true;
++  UpdateOpen();
++}
++
++void VolumeControl::OnMouseExited(const ui::MouseEvent& event) {
++  hovered_ = false;
++  rail_hovered_ = false;
++  UpdateOpen();
++  SchedulePaint();
++}
++
++void VolumeControl::OnMouseMoved(const ui::MouseEvent& event) {
++  const bool on_rail = InSlider(event.location());
++  if (on_rail != rail_hovered_) {
++    rail_hovered_ = on_rail;
++    SchedulePaint();
++  }
++}
++
++bool VolumeControl::OnMousePressed(const ui::MouseEvent& event) {
++  if (!event.IsOnlyLeftMouseButton() || !InSlider(event.location())) {
++    return false;
++  }
++  dragging_ = true;
++  level_callback_.Run(LevelAt(event.y()));
++  SchedulePaint();
++  return true;
++}
++
++bool VolumeControl::OnMouseDragged(const ui::MouseEvent& event) {
++  if (!dragging_) {
++    return false;
++  }
++  level_callback_.Run(LevelAt(event.y()));
++  return true;
++}
++
++void VolumeControl::OnMouseReleased(const ui::MouseEvent& event) {
++  dragging_ = false;
++  UpdateOpen();
++  SchedulePaint();
++}
++
++void VolumeControl::OnMouseCaptureLost() {
++  dragging_ = false;
++  UpdateOpen();
++  SchedulePaint();
++}
++
++bool VolumeControl::OnMouseWheel(const ui::MouseWheelEvent& event) {
++  // Five percent for each notch of the wheel, like Oblò.
++  level_callback_.Run(level_ + 0.05 * event.y_offset() /
++                                   ui::MouseWheelEvent::kWheelDelta);
++  return true;
++}
++
++void VolumeControl::OnPaint(gfx::Canvas* canvas) {
++  GlassPill::OnPaint(canvas);
++  const double open = open_animation_.GetCurrentValue();
++  if (open <= 0) {
++    return;
++  }
++  const gfx::RectF rail = RailBounds();
++  if (rail.IsEmpty()) {
++    return;
++  }
++  // The slider fades in faster than it drops down (opacity .2s).
++  const float alpha = std::min(1.0, open * 1.7);
++  const float radius = rail.width() / 2;
++  canvas->DrawRoundRect(
++      rail, radius,
++      Fill(SkColorSetA(kVolumeRailColor,
++                       base::ClampRound(SkColorGetA(kVolumeRailColor) * alpha))));
++  gfx::ScopedCanvas scoped(canvas);
++  canvas->sk_canvas()->clipRRect(
++      SkRRect::MakeRectXY(gfx::RectFToSkRect(rail), radius, radius), true);
++  const float filled = rail.height() * level_;
++  canvas->DrawRect(
++      gfx::RectF(rail.x(), rail.bottom() - filled, rail.width(), filled),
++      Fill(SkColorSetA(SK_ColorWHITE, base::ClampRound(255 * alpha))));
++}
++
++ui::Cursor VolumeControl::GetCursor(const ui::MouseEvent& event) {
++  return InSlider(event.location()) ? ui::mojom::CursorType::kHand
++                                    : ui::mojom::CursorType::kPointer;
++}
++
++void VolumeControl::VisibilityChanged(views::View* starting_from,
++                                      bool is_visible) {
++  if (is_visible) {
++    return;
++  }
++  // Hidden with the other controls: start closed next time.
++  hovered_ = false;
++  rail_hovered_ = false;
++  dragging_ = false;
++  peeking_ = false;
++  peek_timer_.Stop();
++  open_animation_.Reset(0);
++  UpdateSize();
++}
++
++void VolumeControl::AnimationProgressed(const gfx::Animation* animation) {
++  UpdateSize();
++  SchedulePaint();
++  // The shadow around the pill follows it.
++  if (shadow_view_) {
++    shadow_view_->SchedulePaint();
++  }
++}
++
++void VolumeControl::AnimationEnded(const gfx::Animation* animation) {
++  AnimationProgressed(animation);
++}
++
++void VolumeControl::UpdateOpen() {
++  if (IsBusy()) {
++    open_animation_.Show();
++  } else {
++    open_animation_.Hide();
++  }
++}
++
++void VolumeControl::UpdateSize() {
++  const double open = Ease(open_animation_.GetCurrentValue());
++  SetSize({button_ + 2 * kPillPadding,
++           button_ + 2 * kPillPadding + base::ClampRound(slider_ * open)});
++}
++
++bool VolumeControl::InSlider(const gfx::Point& point) const {
++  return open_animation_.GetCurrentValue() > 0 &&
++         point.y() >= kPillPadding + button_;
++}
++
++gfx::RectF VolumeControl::RailBounds() const {
++  // The slider is `slider_` tall under the speaker, with 6 px of padding at
++  // the top and half a button less 4 px at the bottom. The rail widens from
++  // 6 to 9 px under the mouse.
++  const float top = kPillPadding + button_ + 6;
++  const float bottom = kPillPadding + button_ + slider_ - (button_ / 2.f - 4);
++  const float rail_width = (rail_hovered_ || dragging_) ? 9 : 6;
++  return gfx::RectF(width() / 2.f - rail_width / 2, top, rail_width,
++                    std::max(0.f, bottom - top));
++}
++
++double VolumeControl::LevelAt(int y) const {
++  const gfx::RectF rail = RailBounds();
++  if (rail.height() <= 0) {
++    return level_;
++  }
++  return std::clamp(1 - (y - rail.y()) / rail.height(), 0.0f, 1.0f);
++}
++
++BEGIN_METADATA(VolumeControl)
++END_METADATA
++
++// ProgressRail ----------------------------------------------------------------
++
++ProgressRail::ProgressRail(ScrubCallback callback)
++    : callback_(std::move(callback)) {
++  // transition: height .22s cubic-bezier(.2, .8, .2, 1).
++  hover_animation_.SetSlideDuration(base::Milliseconds(220));
++  hover_animation_.SetTweenType(gfx::Tween::LINEAR);
++}
++
++ProgressRail::~ProgressRail() = default;
++
++void ProgressRail::SetFraction(double fraction) {
++  if (scrubbing_) {
++    return;
++  }
++  fraction = std::clamp(fraction, 0.0, 1.0);
++  if (fraction == fraction_) {
++    return;
++  }
++  fraction_ = fraction;
++  SchedulePaint();
++}
++
++void ProgressRail::SetRailHeights(int rail, int hover_rail) {
++  rail_ = rail;
++  hover_rail_ = hover_rail;
++  SchedulePaint();
++}
++
++void ProgressRail::OnPaint(gfx::Canvas* canvas) {
++  const double grow = Ease(hover_animation_.GetCurrentValue());
++  const float thickness = rail_ + (hover_rail_ - rail_) * grow;
++  const gfx::RectF rail(0, (height() - thickness) / 2, width(), thickness);
++  const float radius = thickness / 2;
++  canvas->DrawRoundRect(rail, radius, Fill(kRailColor));
++  gfx::ScopedCanvas scoped(canvas);
++  canvas->sk_canvas()->clipRRect(
++      SkRRect::MakeRectXY(gfx::RectFToSkRect(rail), radius, radius), true);
++  canvas->DrawRect(
++      gfx::RectF(rail.x(), rail.y(), rail.width() * fraction_, rail.height()),
++      Fill(kPlayedColor));
++}
++
++void ProgressRail::OnMouseEntered(const ui::MouseEvent& event) {
++  hover_animation_.Show();
++}
++
++void ProgressRail::OnMouseExited(const ui::MouseEvent& event) {
++  if (!scrubbing_) {
++    hover_animation_.Hide();
++  }
++}
++
++bool ProgressRail::OnMousePressed(const ui::MouseEvent& event) {
++  if (!event.IsOnlyLeftMouseButton()) {
++    return false;
++  }
++  scrubbing_ = true;
++  fraction_ = FractionAt(event.x());
++  hover_animation_.Show();
++  SchedulePaint();
++  callback_.Run(fraction_, /*done=*/false);
++  return true;
++}
++
++bool ProgressRail::OnMouseDragged(const ui::MouseEvent& event) {
++  if (!scrubbing_) {
++    return false;
++  }
++  fraction_ = FractionAt(event.x());
++  SchedulePaint();
++  callback_.Run(fraction_, /*done=*/false);
++  return true;
++}
++
++void ProgressRail::OnMouseReleased(const ui::MouseEvent& event) {
++  EndScrub();
++}
++
++void ProgressRail::OnMouseCaptureLost() {
++  EndScrub();
++}
++
++ui::Cursor ProgressRail::GetCursor(const ui::MouseEvent& event) {
++  return ui::mojom::CursorType::kHand;
++}
++
++void ProgressRail::VisibilityChanged(views::View* starting_from,
++                                     bool is_visible) {
++  if (!is_visible) {
++    hover_animation_.Reset(0);
++  }
++}
++
++void ProgressRail::AnimationProgressed(const gfx::Animation* animation) {
++  SchedulePaint();
++}
++
++double ProgressRail::FractionAt(int x) const {
++  return width() > 0 ? std::clamp(static_cast<double>(x) / width(), 0.0, 1.0)
++                     : 0;
++}
++
++void ProgressRail::EndScrub() {
++  if (!scrubbing_) {
++    return;
++  }
++  scrubbing_ = false;
++  if (!IsMouseHovered()) {
++    hover_animation_.Hide();
++  }
++  callback_.Run(fraction_, /*done=*/true);
++}
++
++BEGIN_METADATA(ProgressRail)
++END_METADATA
++
++// LiveBadge -------------------------------------------------------------------
++
++namespace {
++
++// padding: 5px 10px; the dot is 7 px with 6 px after it.
++constexpr int kLiveHorizontalPadding = 10;
++constexpr int kLiveVerticalPadding = 5;
++constexpr int kLiveDot = 7;
++constexpr int kLiveGap = 6;
++
++}  // namespace
++
++LiveBadge::LiveBadge(const std::u16string& text) {
++  // font-size: 10.5px; font-weight: 700; text-transform: uppercase.
++  const gfx::FontList base;
++  label_ = AddChildView(std::make_unique<views::Label>(base::i18n::ToUpper(text)));
++  label_->SetFontList(
++      base.Derive(11 - base.GetFontSize(), gfx::Font::NORMAL,
++                  gfx::Font::Weight::BOLD));
++  label_->SetEnabledColor(SK_ColorWHITE);
++  label_->SetBackgroundColor(SK_ColorTRANSPARENT);
++  label_->SetAutoColorReadabilityEnabled(false);
++  label_->SetSubpixelRenderingEnabled(false);
++}
++
++LiveBadge::~LiveBadge() = default;
++
++gfx::Size LiveBadge::GetBadgeSize() const {
++  const gfx::Size text = label_->GetPreferredSize();
++  return {kLiveHorizontalPadding + kLiveDot + kLiveGap + text.width() +
++              kLiveHorizontalPadding,
++          std::max(text.height(), kLiveDot) + 2 * kLiveVerticalPadding};
++}
++
++void LiveBadge::OnBoundsChanged(const gfx::Rect& previous_bounds) {
++  GlassPill::OnBoundsChanged(previous_bounds);
++  const gfx::Size text = label_->GetPreferredSize();
++  label_->SetBounds(kLiveHorizontalPadding + kLiveDot + kLiveGap,
++                    (height() - text.height()) / 2, text.width(),
++                    text.height());
++}
++
++void LiveBadge::OnPaint(gfx::Canvas* canvas) {
++  GlassPill::OnPaint(canvas);
++  const gfx::PointF center(kLiveHorizontalPadding + kLiveDot / 2.f,
++                           height() / 2.f);
++  // box-shadow: 0 0 8px rgba(255,69,58,.8).
++  cc::PaintFlags glow = Fill(SkColorSetA(kLiveColor, 204));
++  glow.setImageFilter(sk_make_sp<cc::BlurPaintFilter>(
++      4, 4, SkTileMode::kDecal, nullptr));
++  canvas->DrawCircle(center, kLiveDot / 2.f, glow);
++  canvas->DrawCircle(center, kLiveDot / 2.f, Fill(kLiveColor));
++}
++
++BEGIN_METADATA(LiveBadge)
++END_METADATA
++
++// PillShadows -----------------------------------------------------------------
++
++PillShadows::PillShadows(std::vector<raw_ptr<views::View>> pills)
++    : pills_(std::move(pills)) {}
++
++PillShadows::~PillShadows() = default;
++
++void PillShadows::Paint(gfx::Canvas* canvas, views::View* view) const {
++  for (views::View* pill : pills_) {
++    if (!pill || !pill->GetVisible() || !pill->parent() || pill->size().IsEmpty()) {
++      continue;
++    }
++    const gfx::RectF bounds = views::View::ConvertRectToTarget(
++        pill->parent(), view, gfx::RectF(pill->bounds()));
++    const float radius = std::min(bounds.width(), bounds.height()) / 2;
++    const SkRRect rrect =
++        SkRRect::MakeRectXY(gfx::RectFToSkRect(bounds), radius, radius);
++    gfx::ScopedCanvas scoped(canvas);
++    canvas->sk_canvas()->clipRRect(rrect, SkClipOp::kDifference, true);
++    // box-shadow: 0 6px 20px rgba(0,0,0,.28).
++    cc::PaintFlags flags = Fill(SK_ColorBLACK);
++    flags.setImageFilter(sk_make_sp<cc::DropShadowPaintFilter>(
++        0, 6, 10, 10, SkColor4f{0, 0, 0, 0.28f},
++        cc::DropShadowPaintFilter::ShadowMode::kDrawShadowOnly, nullptr));
++    canvas->sk_canvas()->drawRRect(rrect, flags);
++  }
++}
++
++// Times -----------------------------------------------------------------------
++
++std::unique_ptr<views::Background> CreateShadeBackground() {
++  return std::make_unique<ShadeBackground>();
++}
++
++void StyleTimeLabel(views::Label* label, bool end) {
++  // color: rgba(255,255,255,.82); text-shadow: 0 1px 4px rgba(0,0,0,.45).
++  label->SetEnabledColor(kTimeColor);
++  label->SetBackgroundColor(SK_ColorTRANSPARENT);
++  label->SetAutoColorReadabilityEnabled(false);
++  label->SetSubpixelRenderingEnabled(false);
++  label->SetShadows({gfx::ShadowValue(gfx::Vector2d(0, 1), 4,
++                                      SkColorSetARGB(115, 0, 0, 0))});
++  label->SetHorizontalAlignment(end ? gfx::ALIGN_RIGHT : gfx::ALIGN_LEFT);
++}
++
++gfx::FontList TimeFont(int size) {
++  // font-weight: 600.
++  const gfx::FontList base;
++  return base.Derive(size - base.GetFontSize(), gfx::Font::NORMAL,
++                     gfx::Font::Weight::SEMIBOLD);
++}
++
++std::u16string FormatTime(base::TimeDelta time) {
++  const int total = std::max(0, base::ClampFloor(time.InSecondsF()));
++  const int hours = total / 3600;
++  const int minutes = (total % 3600) / 60;
++  const int seconds = total % 60;
++  return base::ASCIIToUTF16(
++      hours ? base::StringPrintf("%d:%02d:%02d", hours, minutes, seconds)
++            : base::StringPrintf("%d:%02d", minutes, seconds));
++}
++
++std::u16string TimeTemplate(base::TimeDelta duration) {
++  std::u16string text =
++      u"-" + FormatTime(duration.is_positive() && !duration.is_max()
++                            ? duration
++                            : base::TimeDelta());
++  for (char16_t& c : text) {
++    if (base::IsAsciiDigit(c)) {
++      c = u'0';
++    }
++  }
++  return text;
++}
++
++}  // namespace sail_oblo
+--- a/chrome/browser/ui/views/overlay/video_overlay_window_views.h
++++ b/chrome/browser/ui/views/overlay/video_overlay_window_views.h
+@@ -6,6 +6,7 @@
+ #define CHROME_BROWSER_UI_VIEWS_OVERLAY_VIDEO_OVERLAY_WINDOW_VIEWS_H_
+ 
+ #include <optional>
++#include <string>
+ #include <vector>
+ 
+ #include "base/memory/raw_ptr.h"
+@@ -39,6 +40,14 @@
+ class FrameSinkId;
+ }  // namespace viz
+ 
++namespace sail_oblo {
++class GlassPill;
++class IconButton;
++class LiveBadge;
++class ProgressRail;
++class VolumeControl;
++}  // namespace sail_oblo
++
+ class BackToTabLabelButton;
+ class CloseImageButton;
+ class HangUpButton;
+@@ -338,6 +347,27 @@
+   // Moves the window back onto the screens if it no longer fits on them.
+   void SettleOnScreens();
+ 
++  // Sail: Oblò's controls replace Chromium's. They are made by
++  // SetUpSailViews() and placed by LayoutSailControls(), which sizes them from
++  // the window like Oblò's CSS did.
++  void SetUpSailViews();
++  void LayoutSailControls();
++  // Keeps Chromium's own controls, which Oblò's replace, hidden.
++  void HideChromiumControls();
++  // Hides the controls unless, as in Oblò, the video is paused, something is
++  // being dragged or the mouse is on one of them. The cursor goes too.
++  void MaybeHideSailControls();
++  bool IsSailControlActive() const;
++  void SetSailPlaybackState(PlaybackState playback_state);
++  // Updates the progress rail and the times, while the controls are shown.
++  void UpdateSailProgress();
++  void OnSailScrub(double fraction, bool done);
++  // Mutes or unmutes; unmuting a video turned all the way down brings it
++  // back at half volume.
++  void ToggleSailMute();
++  void RequestSailMute(bool mute);
++  void UpdateSailVolume();
++
+   // Returns the current frame sink id for the surface displayed in the
+   // |video_view_|. If |video_view_| is not currently displaying a surface then
+   // returns nullptr.
+@@ -623,6 +653,29 @@
+   // Waits for a resize to end before moving the window back onto the screens.
+   base::OneShotTimer settle_timer_;
+ 
++  // Sail: Oblò's controls. The glass pills at the top are children of the
++  // contents view, not of `controls_container_view_`, and fade on their own
++  // layers: a backdrop blur inside a fading layer would only see that layer.
++  raw_ptr<sail_oblo::GlassPill> sail_window_pill_ = nullptr;
++  raw_ptr<sail_oblo::IconButton> sail_close_button_ = nullptr;
++  raw_ptr<sail_oblo::IconButton> sail_back_to_tab_button_ = nullptr;
++  raw_ptr<sail_oblo::VolumeControl> sail_volume_ = nullptr;
++  raw_ptr<sail_oblo::IconButton> sail_back_button_ = nullptr;
++  raw_ptr<sail_oblo::IconButton> sail_play_pause_button_ = nullptr;
++  raw_ptr<sail_oblo::IconButton> sail_forward_button_ = nullptr;
++  raw_ptr<sail_oblo::ProgressRail> sail_progress_ = nullptr;
++  raw_ptr<views::Label> sail_elapsed_ = nullptr;
++  raw_ptr<views::Label> sail_remaining_ = nullptr;
++  raw_ptr<sail_oblo::LiveBadge> sail_live_ = nullptr;
++  // The times' widest text for the current video, see TimeTemplate().
++  std::u16string sail_time_template_;
++  bool sail_playing_ = false;
++  // What the video was last asked to be, since the answer comes back later.
++  bool sail_muted_ = false;
++  base::RepeatingTimer sail_progress_timer_;
++  // Hides the controls a moment after the mouse leaves the window.
++  base::OneShotTimer sail_leave_timer_;
++
+   base::WeakPtrFactory<VideoOverlayWindowViews> weak_factory_{this};
+ };
+ 
+--- a/chrome/browser/ui/views/overlay/video_overlay_window_views.cc
++++ b/chrome/browser/ui/views/overlay/video_overlay_window_views.cc
+@@ -43,6 +43,7 @@
+ #include "chrome/browser/ui/views/overlay/overlay_window_live_caption_dialog.h"
+ #include "chrome/browser/ui/views/overlay/playback_image_button.h"
+ #include "chrome/browser/ui/views/overlay/resize_handle_button.h"
++#include "chrome/browser/ui/views/overlay/sail_oblo_controls.h"
+ #include "chrome/browser/ui/views/overlay/simple_overlay_window_image_button.h"
+ #include "chrome/browser/ui/views/overlay/skip_ad_label_button.h"
+ #include "chrome/browser/ui/views/overlay/toggle_camera_button.h"
+@@ -62,6 +63,7 @@
+ #include "media/base/video_util.h"
+ #include "services/media_session/public/cpp/media_image_manager.h"
+ #include "third_party/blink/public/mojom/picture_in_picture/picture_in_picture.mojom.h"
++#include "ui/base/cursor/cursor.h"
+ #include "ui/base/hit_test.h"
+ #include "ui/base/l10n/l10n_util.h"
+ #include "ui/base/metadata/metadata_header_macros.h"
+@@ -77,6 +79,7 @@
+ #include "ui/gfx/geometry/resize_utils.h"
+ #include "ui/gfx/geometry/skia_conversions.h"
+ #include "ui/gfx/text_constants.h"
++#include "ui/gfx/text_utils.h"
+ #include "ui/views/background.h"
+ #include "ui/views/controls/image_view.h"
+ #include "ui/views/controls/label.h"
+@@ -601,11 +604,8 @@
+       hide_controls_timer_(
+           FROM_HERE,
+           base::Milliseconds(2500),
+-          base::BindRepeating(
+-              &VideoOverlayWindowViews::UpdateControlsVisibility,
+-              base::Unretained(this),
+-              false /* is_visible */,
+-              true /* should_animate */)),
++          base::BindRepeating(&VideoOverlayWindowViews::MaybeHideSailControls,
++                              base::Unretained(this))),
+       enable_controls_after_move_timer_(
+           FROM_HERE,
+           VideoOverlayWindowViews::kControlHideDelayAfterMove,
+@@ -709,8 +709,8 @@
+   // Controls should be hidden when there is no more focus on the window. This
+   // is used for tabbing and touch interactions. For mouse interactions, the
+   // window cannot be blurred before the ui::EventType::kMouseExited event is
+-  // handled.
+-  UpdateControlsVisibility(false);
++  // handled. Sail: unless, as in Oblò, the video is paused.
++  MaybeHideSailControls();
+ 
+   views::Widget::OnNativeBlur();
+ }
+@@ -851,6 +851,7 @@
+       // window.
+     case ui::EventType::kMouseMoved:
+     case ui::EventType::kMouseEntered:
++      sail_leave_timer_.Stop();
+       UpdateControlsVisibility(true);
+       break;
+ 
+@@ -865,8 +866,12 @@
+           !GetWindowBackgroundView()->bounds().Contains(event->location()) &&
+           progress_view_drag_state_ ==
+               global_media_controls::DragState::kDragEnded;
++      // Sail: like Oblò, a moment later and not while the video is paused.
+       if (should_update_control_visibility) {
+-        UpdateControlsVisibility(false);
++        sail_leave_timer_.Start(
++            FROM_HERE, base::Milliseconds(500),
++            base::BindOnce(&VideoOverlayWindowViews::MaybeHideSailControls,
++                           base::Unretained(this)));
+       }
+       break;
+     }
+@@ -1039,8 +1044,9 @@
+     // Animate the main controls.
+     if (wanted_visibility != AreControlsVisible()) {
+       const std::vector<raw_ptr<views::View>> controls = {
+-          controls_container_view_, controls_scrim_view_,
+-          controls_bottom_scrim_view_};
++          controls_container_view_.get(), controls_scrim_view_.get(),
++          controls_bottom_scrim_view_.get(), sail_window_pill_.get(),
++          sail_volume_.get()};
+       fade_animation_ = std::make_unique<OverlayControlsFadeAnimation>(
+           controls, wanted_visibility
+                         ? OverlayControlsFadeAnimation::Type::kToShown
+@@ -1061,6 +1067,16 @@
+     GetControlsContainerView()->layer()->SetOpacity(wanted_visibility ? 1.0
+                                                                       : 0.0);
+     GetControlsContainerView()->SetVisible(wanted_visibility);
++    views::View* const sail_pills[] = {sail_window_pill_.get(),
++                                       sail_volume_.get()};
++    for (views::View* pill : sail_pills) {
++      pill->layer()->SetOpacity(wanted_visibility ? 1.0 : 0.0);
++      pill->SetVisible(wanted_visibility);
++    }
++  }
++
++  if (wanted_visibility) {
++    UpdateSailProgress();
+   }
+ }
+ 
+@@ -1209,25 +1225,38 @@
+   if (!AreControlsVisible()) {
+     return false;
+   }
+-  if (GetBackToTabControlsBounds().Contains(point) ||
+-      GetSkipAdControlsBounds().Contains(point) ||
+-      GetCloseControlsBounds().Contains(point) ||
+-      GetMinimizeControlsBounds().Contains(point) ||
+-      GetPlayPauseControlsBounds().Contains(point) ||
+-      GetReplay10SecondsButtonBounds().Contains(point) ||
+-      GetForward10SecondsButtonBounds().Contains(point) ||
+-      GetNextTrackControlsBounds().Contains(point) ||
+-      GetPreviousTrackControlsBounds().Contains(point) ||
+-      GetToggleMicrophoneButtonBounds().Contains(point) ||
+-      GetToggleCameraButtonBounds().Contains(point) ||
+-      GetHangUpButtonBounds().Contains(point) ||
+-      GetToggleMuteButtonBounds().Contains(point) ||
+-      GetProgressViewBounds().Contains(point) ||
+-      GetLiveCaptionButtonBounds().Contains(point) ||
+-      GetLiveCaptionDialogBounds().Contains(point)) {
+-    return true;
++  // Sail: only the controls that are on screen take the mouse; anywhere else
++  // the video can be dragged. Every control here sits in a view that covers
++  // the whole window, so its bounds are in window coordinates.
++  views::View* const controls[] = {
++      sail_window_pill_.get(),
++      sail_volume_.get(),
++      sail_back_button_.get(),
++      sail_play_pause_button_.get(),
++      sail_forward_button_.get(),
++      sail_progress_.get(),
++      back_to_tab_button_.get(),
++      close_controls_view_.get(),
++      minimize_button_.get(),
++      play_pause_controls_view_.get(),
++      replay_10_seconds_button_.get(),
++      forward_10_seconds_button_.get(),
++      next_track_controls_view_.get(),
++      previous_track_controls_view_.get(),
++      toggle_microphone_button_.get(),
++      toggle_camera_button_.get(),
++      hang_up_button_.get(),
++      toggle_mute_button_.get(),
++      progress_view_.get(),
++      live_caption_button_.get(),
++  };
++  for (views::View* control : controls) {
++    if (control && control->IsDrawn() &&
++        control->GetMirroredBounds().Contains(point)) {
++      return true;
++    }
+   }
+-  return false;
++  return GetLiveCaptionDialogBounds().Contains(point);
+ }
+ 
+ content::PictureInPictureWindowController*
+@@ -1599,6 +1628,8 @@
+   resize_handle_view_ =
+       controls_container_view_->AddChildView(std::move(resize_handle_view));
+ #endif
++
++  SetUpSailViews();
+ }
+ 
+ void VideoOverlayWindowViews::OnRootViewReady() {
+@@ -1611,6 +1642,12 @@
+   GetRootView()->SetPaintToLayer(ui::LAYER_TEXTURED);
+   GetRootView()->layer()->SetName("VideoOverlayWindowViews:RootView");
+   GetRootView()->layer()->SetMasksToBounds(true);
++#if BUILDFLAG(IS_MAC)
++  // Sail: round corners, like Oblò. The frameless window is transparent, so
++  // rounding the root layer rounds the video and everything above it.
++  GetRootView()->layer()->SetRoundedCornerRadius(gfx::RoundedCornersF(14));
++  GetRootView()->layer()->SetIsFastRoundedCorner(true);
++#endif
+ 
+   views::View* const contents_view = GetContentsView();
+   for (std::unique_ptr<views::View>& child : view_holder_) {
+@@ -1687,6 +1724,8 @@
+   larger_window_bounds.Inset(-1);
+   controls_scrim_view_->SetBoundsRect(larger_window_bounds);
+ 
++  LayoutSailControls();
++
+   WindowQuadrant quadrant = GetCurrentWindowQuadrant(GetBounds(), controller_);
+   close_controls_view_->SetPosition(GetBounds().size(), quadrant);
+ 
+@@ -1806,6 +1845,7 @@
+     toggle_microphone_button_->SetPosition(center_right_control_position);
+     vc_controls_container_view_->SetVisible(true);
+     playback_controls_container_view_->SetVisible(false);
++    HideChromiumControls();
+     return;
+   }
+   playback_controls_container_view_->SetVisible(show_playback_controls_);
+@@ -1900,6 +1940,7 @@
+   replay_10_seconds_button_->SetVisible(!is_dragging_progress_bar && !is_live_);
+   forward_10_seconds_button_->SetVisible(!is_dragging_progress_bar &&
+                                          !is_live_);
++  HideChromiumControls();
+ }
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+@@ -1917,6 +1958,8 @@
+ }
+ 
+ void VideoOverlayWindowViews::Close() {
++  sail_progress_timer_.Stop();
++  sail_leave_timer_.Stop();
+   views::Widget::Close();
+   MaybeUnregisterFrameSinkHierarchy();
+   if (fade_animator_) {
+@@ -1976,8 +2019,15 @@
+       // this object.
+       base::BindOnce(&VideoOverlayWindowViews::OnInitialTitleTimerFired,
+                      base::Unretained(this)));
+-  // The controls are not visible, but the title should be.
+-  UpdateControlsVisibility(false);
++  // Sail: like Oblò, the controls show for a moment when the window opens.
++  sail_muted_ = controller_->GetMuteStatus();
++  UpdateSailVolume();
++  UpdateControlsVisibility(true);
++  hide_controls_timer_.Reset();
++  sail_progress_timer_.Start(
++      FROM_HERE, base::Milliseconds(250),
++      base::BindRepeating(&VideoOverlayWindowViews::UpdateSailProgress,
++                          base::Unretained(this)));
+ 
+   // Initialize the mute button state from the controller if the button exists.
+   if (toggle_mute_button_) {
+@@ -2000,6 +2050,8 @@
+ void VideoOverlayWindowViews::Hide() {
+   // If there is an existing overlay view, remove it now.
+   RemoveOverlayViewIfExists();
++  sail_progress_timer_.Stop();
++  sail_leave_timer_.Stop();
+   views::Widget::Hide();
+   if (fade_animator_) {
+     fade_animator_->CancelAndReset();
+@@ -2039,6 +2091,7 @@
+ void VideoOverlayWindowViews::SetPlaybackState(PlaybackState playback_state) {
+   playback_state_for_testing_ = playback_state;
+   play_pause_controls_view_->SetPlaybackState(playback_state);
++  SetSailPlaybackState(playback_state);
+ }
+ 
+ void VideoOverlayWindowViews::SetPlayPauseButtonVisibility(bool is_visible) {
+@@ -2109,6 +2162,8 @@
+   if (toggle_mute_button_) {
+     toggle_mute_button_->SetMutedState(muted);
+   }
++  sail_muted_ = muted;
++  UpdateSailVolume();
+ }
+ 
+ void VideoOverlayWindowViews::SetToggleMicrophoneButtonVisibility(
+@@ -2144,6 +2199,7 @@
+   position_ = position;
+   progress_view_->UpdateProgress(position);
+   UpdateTimestampLabel(position_.GetPosition(), position_.duration());
++  UpdateSailProgress();
+ }
+ 
+ void VideoOverlayWindowViews::SetSourceTitle(
+@@ -2383,6 +2439,7 @@
+   // the media player yet.
+   bool is_active = controller_->TogglePlayPause();
+   play_pause_controls_view_->SetPlaybackState(is_active ? kPlaying : kPaused);
++  SetSailPlaybackState(is_active ? kPlaying : kPaused);
+ }
+ 
+ void VideoOverlayWindowViews::Replay10Seconds() {
+@@ -2427,6 +2484,8 @@
+         event->SetHandled();
+         return true;
+       }
++      // The cursor may have been hidden with the controls.
++      SetCursor(ui::Cursor(ui::mojom::CursorType::kPointer));
+       ScreenAreas areas = GetScreenAreas();
+       sail_drag_.emplace();
+       sail_drag_->start_cursor = display::Screen::Get()->GetCursorScreenPoint();
+@@ -2515,18 +2574,21 @@
+     return false;
+   }
+   switch (event->key_code()) {
++    case ui::VKEY_SPACE:
+     case ui::VKEY_K:
+       if (!show_play_pause_button_) {
+         return false;
+       }
+       TogglePlayPause();
+       break;
++    case ui::VKEY_LEFT:
+     case ui::VKEY_J:
+       if (is_live_) {
+         return false;
+       }
+       Replay10Seconds();
+       break;
++    case ui::VKEY_RIGHT:
+     case ui::VKEY_L:
+       if (is_live_) {
+         return false;
+@@ -2535,21 +2597,14 @@
+       break;
+     case ui::VKEY_UP:
+     case ui::VKEY_DOWN: {
+-      const double current =
+-          controller_->GetMuteStatus() ? 0 : controller_->GetVolume();
++      const double current = sail_muted_ ? 0 : controller_->GetVolume();
+       SetSailVolume(current + (event->key_code() == ui::VKEY_UP ? 0.1 : -0.1));
++      sail_volume_->Peek();
+       break;
+     }
+     case ui::VKEY_M:
+-      if (!toggle_mute_button_) {
+-        return false;
+-      }
+-      if (controller_->GetMuteStatus() && controller_->GetVolume() == 0) {
+-        // Muted by turning the volume all the way down: come back at half.
+-        SetSailVolume(0.5);
+-      } else {
+-        controller_->RequestMute(!controller_->GetMuteStatus());
+-      }
++      ToggleSailMute();
++      sail_volume_->Peek();
+       break;
+     case ui::VKEY_F:
+       ToggleFillScreen();
+@@ -2582,12 +2637,12 @@
+   volume = std::round(std::clamp(volume, 0.0, 1.0) * 100) / 100;
+   controller_->SetVolume(volume);
+   // Like Oblò: all the way down mutes, turning it up again unmutes.
+-  const bool muted = controller_->GetMuteStatus();
+-  if (volume == 0 && !muted) {
+-    controller_->RequestMute(true);
+-  } else if (volume > 0 && muted) {
+-    controller_->RequestMute(false);
++  if (volume == 0 && !sail_muted_) {
++    RequestSailMute(true);
++  } else if (volume > 0 && sail_muted_) {
++    RequestSailMute(false);
+   }
++  UpdateSailVolume();
+ }
+ 
+ void VideoOverlayWindowViews::SettleOnScreens() {
+@@ -2601,6 +2656,316 @@
+   }
+ }
+ 
++void VideoOverlayWindowViews::SetUpSailViews() {
++  // The shade replaces Chromium's dimming. As in Oblò there are no gradients
++  // at the top and bottom and no title (origin and favicon).
++  controls_scrim_view_->SetBackground(sail_oblo::CreateShadeBackground());
++  controls_top_scrim_view_->SetBackground(nullptr);
++  controls_bottom_scrim_view_->SetBackground(nullptr);
++  favicon_view_->SetVisible(false);
++  origin_->SetVisible(false);
++  HideChromiumControls();
++
++  // Top left: close, and back to the tab.
++  auto window_pill = std::make_unique<sail_oblo::GlassPill>();
++  sail_close_button_ =
++      window_pill->AddChildView(std::make_unique<sail_oblo::IconButton>(
++          base::BindRepeating(
++              &VideoOverlayWindowViews::CloseAndPauseIfAvailable,
++              base::Unretained(this)),
++          sail_oblo::Icon::kClose,
++          l10n_util::GetStringUTF16(IDS_PICTURE_IN_PICTURE_CLOSE_CONTROL_TEXT)));
++  sail_back_to_tab_button_ =
++      window_pill->AddChildView(std::make_unique<sail_oblo::IconButton>(
++          base::BindRepeating([] {
++            PictureInPictureWindowManager::GetInstance()
++                ->ExitPictureInPictureViaWindowUi(
++                    PictureInPictureWindowManager::UiBehavior::
++                        kCloseWindowAndFocusOpener);
++          }),
++          sail_oblo::Icon::kReturnToTab,
++          l10n_util::GetStringUTF16(
++              IDS_PICTURE_IN_PICTURE_BACK_TO_TAB_CONTROL_TEXT)));
++  sail_window_pill_ = AddChildView(&view_holder_, std::move(window_pill));
++
++  // Top right: the volume.
++  sail_volume_ = AddChildView(
++      &view_holder_,
++      std::make_unique<sail_oblo::VolumeControl>(
++          base::BindRepeating(&VideoOverlayWindowViews::ToggleSailMute,
++                              base::Unretained(this)),
++          base::BindRepeating(&VideoOverlayWindowViews::SetSailVolume,
++                              base::Unretained(this)),
++          l10n_util::GetStringUTF16(IDS_PICTURE_IN_PICTURE_MUTE_TEXT)));
++  sail_volume_->SetShadowView(controls_container_view_);
++
++  // Middle: back ten seconds, play/pause, forward ten seconds.
++  const auto add_center_button = [this](base::RepeatingClosure callback,
++                                        sail_oblo::Icon icon, int label) {
++    auto button = std::make_unique<sail_oblo::IconButton>(
++        std::move(callback), icon, l10n_util::GetStringUTF16(label));
++    button->SetCenterStyle(true);
++    return playback_controls_container_view_->AddChildView(std::move(button));
++  };
++  sail_back_button_ = add_center_button(
++      base::BindRepeating(&VideoOverlayWindowViews::Replay10Seconds,
++                          base::Unretained(this)),
++      sail_oblo::Icon::kBack, IDS_PICTURE_IN_PICTURE_REPLAY_10_TEXT);
++  sail_play_pause_button_ = add_center_button(
++      base::BindRepeating(&VideoOverlayWindowViews::TogglePlayPause,
++                          base::Unretained(this)),
++      sail_oblo::Icon::kPlay, IDS_PICTURE_IN_PICTURE_PLAY_CONTROL_TEXT);
++  sail_forward_button_ = add_center_button(
++      base::BindRepeating(&VideoOverlayWindowViews::Forward10Seconds,
++                          base::Unretained(this)),
++      sail_oblo::Icon::kForward, IDS_PICTURE_IN_PICTURE_FORWARD_10_TEXT);
++
++  // Bottom: elapsed time, the rail and the remaining time, or "live".
++  sail_elapsed_ = playback_controls_container_view_->AddChildView(
++      std::make_unique<views::Label>(std::u16string()));
++  sail_oblo::StyleTimeLabel(sail_elapsed_, /*end=*/false);
++  sail_progress_ = playback_controls_container_view_->AddChildView(
++      std::make_unique<sail_oblo::ProgressRail>(
++          base::BindRepeating(&VideoOverlayWindowViews::OnSailScrub,
++                              base::Unretained(this))));
++  sail_remaining_ = playback_controls_container_view_->AddChildView(
++      std::make_unique<views::Label>(std::u16string()));
++  sail_oblo::StyleTimeLabel(sail_remaining_, /*end=*/true);
++  sail_live_ = playback_controls_container_view_->AddChildView(
++      std::make_unique<sail_oblo::LiveBadge>(
++          l10n_util::GetStringUTF16(IDS_PICTURE_IN_PICTURE_LIVE_STATUS_TEXT)));
++  sail_live_->SetVisible(false);
++
++  controls_container_view_->SetBackground(
++      std::make_unique<sail_oblo::PillShadows>(std::vector<raw_ptr<views::View>>{
++          sail_window_pill_.get(), sail_volume_.get(), sail_live_.get()}));
++}
++
++void VideoOverlayWindowViews::LayoutSailControls() {
++  const gfx::Size size = GetBounds().size();
++  if (size.IsEmpty() || !sail_window_pill_) {
++    return;
++  }
++  const sail_oblo::Metrics m(size);
++
++  // Top: the window's buttons at the left, the volume at the right.
++  sail_close_button_->SetGlyphSize(m.glyph);
++  sail_back_to_tab_button_->SetGlyphSize(m.glyph);
++  sail_window_pill_->LayOutRow(m.button);
++  sail_window_pill_->SetPosition({m.edge, m.edge});
++  sail_volume_->SetSizes(m.button, m.volume, m.glyph);
++  sail_volume_->SetPosition(
++      {size.width() - m.edge - sail_volume_->width(), m.edge});
++
++  // Middle, centered on the whole window. Live videos cannot seek.
++  const bool show_seek = !is_live_ && !m.small;
++  sail_back_button_->SetVisible(show_seek);
++  sail_forward_button_->SetVisible(show_seek);
++  sail_play_pause_button_->SetVisible(show_play_pause_button_);
++  const std::pair<sail_oblo::IconButton*, int> center[] = {
++      {sail_back_button_.get(), m.skip},
++      {sail_play_pause_button_.get(), m.play},
++      {sail_forward_button_.get(), m.skip},
++  };
++  int total = -m.center_gap;
++  for (const auto& [button, glyph] : center) {
++    if (button->GetVisible()) {
++      total += glyph + 2 * m.center_padding + m.center_gap;
++    }
++  }
++  int x = (size.width() - total) / 2;
++  for (const auto& [button, glyph] : center) {
++    if (!button->GetVisible()) {
++      continue;
++    }
++    const int side = glyph + 2 * m.center_padding;
++    button->SetGlyphSize(glyph);
++    button->SetBounds(x, (size.height() - side) / 2, side, side);
++    x += side + m.center_gap;
++  }
++
++  // Bottom row.
++  const int left = m.bottom_side;
++  const int right = size.width() - m.bottom_side;
++  const int bottom = size.height() - m.bottom_edge;
++  const bool show_times = !is_live_ && !m.small;
++  sail_elapsed_->SetVisible(show_times);
++  sail_remaining_->SetVisible(show_times);
++  sail_progress_->SetVisible(!is_live_);
++  sail_live_->SetVisible(is_live_);
++
++  const gfx::FontList font = sail_oblo::TimeFont(m.time_font);
++  sail_elapsed_->SetFontList(font);
++  sail_remaining_->SetFontList(font);
++  sail_time_template_ = sail_oblo::TimeTemplate(position_.duration());
++  // min-width: 3.1em.
++  const int time_width =
++      std::max(base::ClampCeil(3.1 * m.time_font),
++               gfx::GetStringWidth(sail_time_template_, font));
++  const int time_height = font.GetHeight();
++  const int row = std::max(m.track, time_height);
++  const int row_top = bottom - row;
++  int rail_left = left;
++  int rail_right = right;
++  if (show_times) {
++    const int y = row_top + (row - time_height) / 2;
++    sail_elapsed_->SetBounds(left, y, time_width, time_height);
++    sail_remaining_->SetBounds(right - time_width, y, time_width, time_height);
++    rail_left += time_width + m.bottom_gap;
++    rail_right -= time_width + m.bottom_gap;
++  }
++  sail_progress_->SetRailHeights(m.rail, m.rail_hover);
++  sail_progress_->SetBounds(rail_left, row_top + (row - m.track) / 2,
++                            std::max(0, rail_right - rail_left), m.track);
++
++  const gfx::Size badge = sail_live_->GetBadgeSize();
++  sail_live_->SetBounds((size.width() - badge.width()) / 2,
++                        bottom - badge.height(), badge.width(),
++                        badge.height());
++
++  // The pills' shadows are painted by the controls container.
++  controls_container_view_->SchedulePaint();
++  UpdateSailProgress();
++}
++
++void VideoOverlayWindowViews::HideChromiumControls() {
++  views::View* const controls[] = {
++      close_controls_view_.get(),
++      minimize_button_.get(),
++      back_to_tab_button_.get(),
++      play_pause_controls_view_.get(),
++      replay_10_seconds_button_.get(),
++      forward_10_seconds_button_.get(),
++      previous_track_controls_view_.get(),
++      next_track_controls_view_.get(),
++      progress_view_.get(),
++      timestamp_.get(),
++      live_status_.get(),
++      toggle_mute_button_.get(),
++  };
++  for (views::View* control : controls) {
++    if (control) {
++      control->SetVisible(false);
++    }
++  }
++}
++
++void VideoOverlayWindowViews::MaybeHideSailControls() {
++  if (!sail_playing_ || sail_drag_ || IsSailControlActive()) {
++    return;
++  }
++  UpdateControlsVisibility(false);
++  // cursor: none while the controls are away.
++  if (GetWindowBoundsInScreen().Contains(
++          display::Screen::Get()->GetCursorScreenPoint())) {
++    SetCursor(ui::Cursor(ui::mojom::CursorType::kNone));
++  }
++}
++
++bool VideoOverlayWindowViews::IsSailControlActive() const {
++  if (!sail_volume_) {
++    return false;
++  }
++  if (sail_volume_->IsBusy() || sail_progress_->scrubbing()) {
++    return true;
++  }
++  const views::View* const controls[] = {
++      sail_window_pill_.get(),      sail_volume_.get(),
++      sail_back_button_.get(),      sail_play_pause_button_.get(),
++      sail_forward_button_.get(),   sail_progress_.get(),
++  };
++  return std::ranges::any_of(controls, [](const views::View* control) {
++    return control->IsDrawn() && control->IsMouseHovered();
++  });
++}
++
++void VideoOverlayWindowViews::SetSailPlaybackState(
++    PlaybackState playback_state) {
++  if (!sail_play_pause_button_) {
++    return;
++  }
++  const bool playing = playback_state == kPlaying;
++  sail_play_pause_button_->SetIcon(
++      playing ? sail_oblo::Icon::kPause : sail_oblo::Icon::kPlay,
++      l10n_util::GetStringUTF16(
++          playing ? IDS_PICTURE_IN_PICTURE_PAUSE_CONTROL_TEXT
++          : playback_state == kEndOfVideo
++              ? IDS_PICTURE_IN_PICTURE_REPLAY_CONTROL_TEXT
++              : IDS_PICTURE_IN_PICTURE_PLAY_CONTROL_TEXT));
++  if (playing == sail_playing_) {
++    return;
++  }
++  sail_playing_ = playing;
++  // Like Oblò, the controls come up for a moment when the video starts or
++  // stops.
++  if (IsVisible()) {
++    UpdateControlsVisibility(true);
++    hide_controls_timer_.Reset();
++  }
++}
++
++void VideoOverlayWindowViews::UpdateSailProgress() {
++  if (!sail_progress_ || is_live_ || !AreControlsVisible()) {
++    return;
++  }
++  const base::TimeDelta duration =
++      std::max(position_.duration(), base::TimeDelta());
++  if (sail_oblo::TimeTemplate(duration) != sail_time_template_) {
++    // The video is longer or shorter by a digit: the times need more or less
++    // room.
++    LayoutSailControls();
++    return;
++  }
++  base::TimeDelta current;
++  if (sail_progress_->scrubbing()) {
++    current = duration * sail_progress_->fraction();
++  } else {
++    current = std::clamp(position_.GetPosition(), base::TimeDelta(), duration);
++    sail_progress_->SetFraction(duration.is_positive() ? current / duration
++                                                       : 0);
++  }
++  sail_elapsed_->SetText(sail_oblo::FormatTime(current));
++  sail_remaining_->SetText(u"-" + sail_oblo::FormatTime(duration - current));
++}
++
++void VideoOverlayWindowViews::OnSailScrub(double fraction, bool done) {
++  if (done) {
++    SeekForProgressBarInteraction(fraction);
++    // Show the new position right away, as Oblò does, rather than the old one
++    // until the video reports back.
++    position_ = media_session::MediaPosition(
++        position_.playback_rate(), position_.duration(),
++        position_.duration() * fraction, /*end_of_media=*/false);
++  }
++  UpdateSailProgress();
++}
++
++void VideoOverlayWindowViews::ToggleSailMute() {
++  const double volume = controller_->GetVolume();
++  if (sail_muted_ || volume == 0) {
++    SetSailVolume(volume > 0.02 ? volume : 0.5);
++  } else {
++    RequestSailMute(true);
++    UpdateSailVolume();
++  }
++}
++
++void VideoOverlayWindowViews::RequestSailMute(bool mute) {
++  sail_muted_ = mute;
++  controller_->RequestMute(mute);
++}
++
++void VideoOverlayWindowViews::UpdateSailVolume() {
++  if (!sail_volume_) {
++    return;
++  }
++  const double level = sail_muted_ ? 0 : controller_->GetVolume();
++  sail_volume_->SetLevel(
++      level, l10n_util::GetStringUTF16(level == 0
++                                           ? IDS_PICTURE_IN_PICTURE_UNMUTE_TEXT
++                                           : IDS_PICTURE_IN_PICTURE_MUTE_TEXT));
++}
++
+ PlaybackImageButton*
+ VideoOverlayWindowViews::play_pause_controls_view_for_testing() const {
+   return play_pause_controls_view_;

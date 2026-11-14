@@ -16,6 +16,11 @@ helium_resources() {
   python3 "$_main_repo/utils/replace_resources.py" "$_main_repo/resources/helium_resources.txt" "$_main_repo/resources" "$_src_dir"
 }
 
+# Sail: turns the prepared Helium tree into Sail (names, icons, sail://).
+sail_rebrand() {
+  python3 "$_root_dir/sail/rebrand.py" "$_src_dir"
+}
+
 fetch_sources() {
   local download="${1:-true}" host_arch
   local downloads=("$_root_dir/downloads.ini" "$_main_repo/deps.ini")
@@ -59,6 +64,7 @@ prepare_sources() {
     --tree "$_main_repo" --platform-tree "$_root_dir" --chromium-tree "$_src_dir"
 
   helium_resources
+  sail_rebrand
 }
 
 write_gn_args() {
