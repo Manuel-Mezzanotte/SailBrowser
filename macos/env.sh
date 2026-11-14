@@ -4,12 +4,15 @@ _arch="$(/usr/bin/uname -m)"
 
 # General paths
 _root_dir=${_root_dir:-$(dirname "$(greadlink -f "$0")")}
-_download_cache="$_root_dir/build/download_cache"
-_src_dir="$_root_dir/build/src"
+# Sail: this folder holds the macOS files; the build, Chromium and the Sail
+# layer are shared with Windows at the top of the repository.
+_repo_dir="$(dirname "$_root_dir")"
+_download_cache="$_repo_dir/build/download_cache"
+_src_dir="$_repo_dir/build/src"
 _out_dir="$_src_dir/out/Default"
-_main_repo="$_root_dir/helium-chromium"
-_subs_cache="$_root_dir/build/subs.tar.gz"
-_namesubs_cache="$_root_dir/build/namesubs.tar"
+_main_repo="$_repo_dir/helium-chromium"
+_subs_cache="$_repo_dir/build/subs.tar.gz"
+_namesubs_cache="$_repo_dir/build/namesubs.tar"
 
 # Build tool paths
 _depot_tools_dir="$_src_dir/third_party/depot_tools"

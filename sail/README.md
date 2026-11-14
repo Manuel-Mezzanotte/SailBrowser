@@ -5,12 +5,12 @@ Tutte le modifiche di Sail stanno in questa cartella. Così, quando si importano
 
 ## Come funziona
 
-La build prepara il codice come Helium (patch, sostituzione dei nomi, risorse). Alla fine `prepare_sources` in `devutils/shared.sh` lancia `sail/rebrand.py`, che:
+La build prepara il codice come Helium (patch, sostituzione dei nomi, risorse). Alla fine lancia `sail/rebrand.py`: su Mac lo fa `prepare_sources` in `macos/devutils/shared.sh`, su Windows `windows/build.py` (con `--platform windows`). Lo script:
 
 - **nome**: cambia "Helium" in "Sail" in tutti i testi dell'interfaccia, in ogni lingua, anche dove il nome è attaccato ad altre lettere (finlandese "Heliumin", coreano "Helium을", amarico "የHelium");
 - **servizi online**: i "Servizi Helium" diventano "Servizi online" (vedi sotto);
 - **indirizzi interni**: usa `sail://` al posto di `helium://`;
-- **identità dell'app**: usa il bundle ID `com.manuelmezzanotte.sail`, la cartella dati `~/Library/Application Support/com.manuelmezzanotte.sail` e la voce del portachiavi "Sail Storage Key";
+- **identità dell'app**: su Mac usa il bundle ID `com.manuelmezzanotte.sail`, la cartella dati `~/Library/Application Support/com.manuelmezzanotte.sail` e la voce del portachiavi "Sail Storage Key". Su Windows usa la cartella `%LOCALAPPDATA%\Sail\Sail`, chiavi di registro e un ID app propri (`{BC9170C5-6303-4228-AF17-46D482BEC3FA}`, lo stesso di `windows/installer/sail.nsi`), così Sail e Helium possono stare installati insieme;
 - **crash report**: li disattiva, così non vengono mai inviati ai server di Helium;
 - **icone e loghi**: copia quelli di `sail/resources/` sopra quelli di Helium, compresa l'icona della scheda Nuova scheda;
 - **schermata di benvenuto**: mette il logo di Sail (anche nell'animazione di importazione), toglie il badge "Helium Partner" e collega privacy e termini a [`PRIVACY.md`](PRIVACY.md) e alla licenza;
@@ -119,7 +119,8 @@ Nell'app il nome Helium non compare più. Restano, di proposito:
 
 ## Da fare prima di una release pubblica
 
-- Rigenerare `resources/dmg_dsstore` per `Sail.app` con `devutils/generate_dmg_dsstore.sh`. Senza, nel DMG l'icona di Sail non è nella posizione prevista.
+- Rigenerare `macos/resources/dmg_dsstore` per `Sail.app` con `macos/devutils/generate_dmg_dsstore.sh`. Senza, nel DMG l'icona di Sail non è nella posizione prevista.
 - Firma e notarizzazione con un account Apple Developer.
-- Rendere pubblico il repository: i link a privacy, termini e codice sorgente nell'app puntano qui su GitHub.
+- Firma del codice su Windows. Senza, al primo avvio SmartScreen avvisa ("Ulteriori informazioni" → "Esegui comunque").
+- Unire `sail/rebrand` in `main`: i link a privacy e termini nell'app puntano a `blob/main`.
 - Tradurre le frasi dei "Servizi online" nelle lingue diverse da inglese e italiano.

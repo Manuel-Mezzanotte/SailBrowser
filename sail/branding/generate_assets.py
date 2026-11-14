@@ -26,8 +26,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / 'sail' / 'resources'
 SRC = ROOT / 'build' / 'src'
-HELIUM_ASSETS = ROOT / 'resources' / 'assets'
-HELIUM_DMG_BACKGROUND = ROOT / 'resources' / 'dmg_background.png'
+HELIUM_ASSETS = ROOT / 'macos' / 'resources' / 'assets'
+HELIUM_DMG_BACKGROUND = ROOT / 'macos' / 'resources' / 'dmg_background.png'
 COMPILE_CAR = SRC / 'tools' / 'mac' / 'icons' / 'compile_car.py'
 # Roboto is Apache-2.0 licensed and ships with the Chromium source tree.
 FONT = SRC / 'third_party' / 'skia' / 'resources' / 'fonts' / 'Roboto-Regular.ttf'

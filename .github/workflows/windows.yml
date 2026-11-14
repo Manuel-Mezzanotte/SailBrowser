@@ -1,0 +1,30 @@
+# Builds Sail for Windows (x64) on GitHub's servers and uploads the installer.
+# Start it from the Actions tab ("Windows build" -> Run workflow) or with
+#   gh workflow run windows.yml --ref <branch>
+# Chromium takes about 30-40 hours on a GitHub runner, so the build is split
+# into stages of 5.5 hours (a job may run for 6 hours at most). Each stage saves
+# the build tree as an artifact and the next one continues from it.
+name: Windows build
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        required: false
+        description: Runner image name
+        default: windows-2025
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build x64
+    uses: ./.github/workflows/windows-build-steps.yml
+    with:
+      arch: x86_64
+      runs-on: ${{ inputs.runner }}

@@ -1,0 +1,34 @@
+name: Stage
+description: Run one stage of the Windows build (windows/build.py --ci)
+inputs:
+  from_artifact:
+    description: Continue from the build tree a previous stage uploaded
+    required: true
+  package_here:
+    description: Package on this runner if compilation finishes with time to spare
+    default: false
+  save_artifact:
+    description: Save the build tree for another job
+    default: true
+  arm:
+    description: Build for arm64
+    required: false
+    default: false
+  upload_final:
+    description: Upload the finished packages instead of building
+    required: false
+    default: false
+  final_directory:
+    description: Folder of finished packages to upload
+    required: false
+outputs:
+  finished:
+    description: The compile is complete
+  package_here:
+    description: Compilation finished with enough time to package on this runner
+  version:
+    description: Version of the Sail build
+
+runs:
+  using: node24
+  main: index.js

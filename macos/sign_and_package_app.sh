@@ -1,12 +1,13 @@
 #!/bin/bash -eux
 
 _root_dir="$(dirname "$(greadlink -f "$0")")"
+_repo_dir="$(dirname "$_root_dir")"
 _bundle_id="com.manuelmezzanotte.sail"
 _app="out/Default/Sail.app"
 _packaging="out/Default/Sail Packaging"
 
 # Paths below are relative to the Chromium source tree.
-cd "$_root_dir/build/src"
+cd "$_repo_dir/build/src"
 
 if [ -n "${MACOS_CERTIFICATE_NAME:-}" ]; then
   if [ -n "${PROD_MACOS_SPECIAL_ENTITLEMENTS_PROFILE_PATH:-}" ]; then
@@ -50,10 +51,10 @@ else
 fi
 
 if [ -z "${OUT_DMG_PATH:-}" ]; then
-  _chromium_version=$(cat "$_root_dir/helium-chromium/chromium_version.txt")
-  _helium_revision=$(cat "$_root_dir/helium-chromium/revision.txt")
+  _chromium_version=$(cat "$_repo_dir/helium-chromium/chromium_version.txt")
+  _helium_revision=$(cat "$_repo_dir/helium-chromium/revision.txt")
   _platform_revision=$(cat "$_root_dir/revision.txt")
-  OUT_DMG_PATH="$_root_dir/build/sail_${_chromium_version}-${_helium_revision}.${_platform_revision}_macos.dmg"
+  OUT_DMG_PATH="$_repo_dir/build/sail_${_chromium_version}-${_helium_revision}.${_platform_revision}_macos.dmg"
 fi
 
 # Package the app
@@ -64,7 +65,7 @@ chrome/installer/mac/pkg-dmg \
   --icon "$_app/Contents/Resources/app.icns" \
   --symlink /Applications:/Applications \
   --mkdir .background \
-  --copy "$_root_dir/sail/resources/dmg_background.png:/.background/dmg_background.png" \
+  --copy "$_repo_dir/sail/resources/dmg_background.png:/.background/dmg_background.png" \
   --copy "$_root_dir/resources/dmg_dsstore:/.DS_Store" \
   --verbosity 2
 

@@ -1,0 +1,2 @@
+../../sail/resources/branding/app_icon/raw.png generated/app.ico
+../../sail/resources/branding/app_icon/raw.png generated/document.ico

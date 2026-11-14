@@ -41,7 +41,9 @@ import name_substitution_utils as grit_util  # noqa: E402
 
 PRODUCT = 'Sail'
 BUNDLE_ID = 'com.manuelmezzanotte.sail'
-SOURCE_URL = 'https://github.com/Manuel-Mezzanotte/MioBrowser'
+# Windows app ID (Helium's is {FB68A146-...}).
+WINDOWS_APP_GUID = '{BC9170C5-6303-4228-AF17-46D482BEC3FA}'
+SOURCE_URL = 'https://github.com/Manuel-Mezzanotte/SailBrowser'
 ISSUES_URL = f'{SOURCE_URL}/issues/new'
 PRIVACY_URL = f'{SOURCE_URL}/blob/main/sail/PRIVACY.md'
 TERMS_URL = f'{SOURCE_URL}/blob/main/LICENSE'
@@ -72,15 +74,6 @@ CODE_EDITS = [
      "protocol === 'helium:'", "protocol === 'sail:'"),
     ('chrome/browser/resources/tab_search/tab_search_item.ts',
      "createTextNode('helium://')", "createTextNode('sail://')"),
-
-    # Own keychain item and profile folder, so Sail never touches Helium's data.
-    ('components/os_crypt/common/keychain_password_mac.mm',
-     'kDefaultServiceName[] = "Helium Storage Key";',
-     f'kDefaultServiceName[] = "{PRODUCT} Storage Key";'),
-    ('components/os_crypt/common/keychain_password_mac.mm',
-     'kDefaultAccountName[] = "Helium";', f'kDefaultAccountName[] = "{PRODUCT}";'),
-    ('chrome/common/chrome_paths_mac.mm',
-     'product_dir_name = "net.imput.helium";', f'product_dir_name = "{BUNDLE_ID}";'),
 
     # Crash reports must never reach Helium's server: no upload URL, and the
     # "send report?" prompt is off by default.
@@ -159,6 +152,49 @@ CODE_EDITS = [
      "'opensource_link': 'https://github.com/imputnet/helium',",
      f"'opensource_link': '{SOURCE_URL}',"),
 ]
+
+# Edits for one platform only, on top of CODE_EDITS.
+PLATFORM_CODE_EDITS = {
+    'macos': [
+        # Own keychain item and profile folder, so Sail never touches Helium's
+        # data.
+        ('components/os_crypt/common/keychain_password_mac.mm',
+         'kDefaultServiceName[] = "Helium Storage Key";',
+         f'kDefaultServiceName[] = "{PRODUCT} Storage Key";'),
+        ('components/os_crypt/common/keychain_password_mac.mm',
+         'kDefaultAccountName[] = "Helium";', f'kDefaultAccountName[] = "{PRODUCT}";'),
+        ('chrome/common/chrome_paths_mac.mm',
+         'product_dir_name = "net.imput.helium";', f'product_dir_name = "{BUNDLE_ID}";'),
+    ],
+    'windows': [
+        # Own install folder (%LOCALAPPDATA%\Sail\Sail), registry keys and
+        # app ID, so Sail and Helium can be installed side by side. The GUID
+        # is also in windows/installer/sail.nsi.
+        ('chrome/install_static/chromium_install_modes.h',
+         'kCompanyPathName[] = L"imput";', f'kCompanyPathName[] = L"{PRODUCT}";'),
+        ('chrome/install_static/chromium_install_modes.h',
+         'kProductPathName[] = L"Helium";', f'kProductPathName[] = L"{PRODUCT}";'),
+        ('chrome/install_static/chromium_install_modes.h',
+         'kSafeBrowsingName[] = "helium";', 'kSafeBrowsingName[] = "sail";'),
+        ('chrome/install_static/chromium_install_modes.h',
+         'L"{FB68A146-637A-48C2-A0C4-1565DE45FEBD}"',
+         f'L"{WINDOWS_APP_GUID}"', 2),
+        ('chrome/install_static/chromium_install_modes.h',
+         '.base_app_name = L"Helium",', f'.base_app_name = L"{PRODUCT}",'),
+        ('chrome/install_static/chromium_install_modes.h',
+         '.base_app_id = L"Helium",', f'.base_app_id = L"{PRODUCT}",'),
+        ('chrome/install_static/chromium_install_modes.h',
+         'L"HeliumHTM"', f'L"{PRODUCT}HTM"'),
+        ('chrome/install_static/chromium_install_modes.h',
+         'L"Helium HTML Document"', f'L"{PRODUCT} HTML Document"'),
+        ('chrome/install_static/chromium_install_modes.h',
+         '.direct_launch_url_scheme = "helium",', '.direct_launch_url_scheme = "sail",'),
+        ('chrome/install_static/chromium_install_modes.h',
+         'L"HeliumPDF"', f'L"{PRODUCT}PDF"'),
+        ('chrome/install_static/chromium_install_modes.h',
+         'L"Helium PDF Document"', f'L"{PRODUCT} PDF Document"'),
+    ],
+}
 
 # Flag names and descriptions in sail://flags ("Helium flag.", "Helium Noise").
 FLAG_ENTRIES = 'chrome/browser/helium_flag_entries.h'
@@ -264,7 +300,9 @@ def apply_patches(tree):
     """Applies sail/patches/series. The patches are written against the tree
     as it is after Helium's preparation. Patches already in the tree are
     skipped, so the script can run again on a prepared tree."""
-    patch_bin = shutil.which('patch')
+    # On Windows there is no patch in PATH; windows/build.py passes the one
+    # that comes with Chromium's bundled git.
+    patch_bin = os.environ.get('SAIL_PATCH_BIN') or shutil.which('patch')
     if not patch_bin:
         raise RebrandError('the patch command is missing')
     names = [line.strip() for line in (SAIL_PATCHES / 'series').read_text().splitlines()
@@ -282,8 +320,8 @@ def apply_patches(tree):
     print(f'Applied {len(names) - done} of {len(names)} Sail patches')
 
 
-def apply_code_edits(tree):
-    for relpath, old, new, *count in CODE_EDITS:
+def apply_code_edits(tree, platform):
+    for relpath, old, new, *count in CODE_EDITS + PLATFORM_CODE_EDITS[platform]:
         expected = count[0] if count else 1
         path = tree / relpath
         text = path.read_text(encoding='utf-8')
@@ -291,7 +329,7 @@ def apply_code_edits(tree):
             if text.count(old) != expected:
                 raise RebrandError(f'{relpath}: expected "{old}" {expected} times, '
                                    f'found {text.count(old)}')
-            path.write_text(text.replace(old, new), encoding='utf-8')
+            path.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
         elif new and new not in text:
             raise RebrandError(f'{relpath}: neither "{old}" nor "{new}" found; '
                                'upstream Helium changed this line')
@@ -299,7 +337,7 @@ def apply_code_edits(tree):
     path = tree / FLAG_ENTRIES
     text = path.read_text(encoding='utf-8')
     if FLAG_HELIUM.search(text):
-        path.write_text(FLAG_HELIUM.sub(PRODUCT, text), encoding='utf-8')
+        path.write_text(FLAG_HELIUM.sub(PRODUCT, text), encoding='utf-8', newline='\n')
     elif f'{PRODUCT} flag' not in text:
         raise RebrandError(f'{FLAG_ENTRIES}: no "Helium flag" descriptions found; '
                            'upstream Helium changed the flag list')
@@ -312,11 +350,11 @@ def apply_code_edits(tree):
         if '<HeliumLogo ' not in text or '<script lang="ts">\n' not in text:
             raise RebrandError(f'{relpath}: Helium logo markup not found')
         text = text.replace('<script lang="ts">\n', '<script lang="ts">\n' + SAIL_LOGO_IMPORT, 1)
-        path.write_text(text.replace('<HeliumLogo ', '<SailLogo '), encoding='utf-8')
+        path.write_text(text.replace('<HeliumLogo ', '<SailLogo '), encoding='utf-8', newline='\n')
 
     branding = tree / 'chrome' / 'app' / 'theme' / 'chromium' / 'BRANDING'
     if branding.read_text(encoding='utf-8') != BRANDING:
-        branding.write_text(BRANDING, encoding='utf-8')
+        branding.write_text(BRANDING, encoding='utf-8', newline='\n')
 
 
 def _read_grit(path):
@@ -332,7 +370,7 @@ def _write_grit(path, root):
     # expect the root element first and fail on an added XML declaration.
     declaration = path.read_text(encoding='utf-8').lstrip().startswith('<?xml')
     text = xml.tostring(root, encoding='unicode', xml_declaration=declaration)
-    path.write_text(text.replace('!!dollar-sign-literal!!', '&#36;'), encoding='utf-8')
+    path.write_text(text.replace('!!dollar-sign-literal!!', '&#36;'), encoding='utf-8', newline='\n')
 
 
 def _rebrand_grd(args):
@@ -402,11 +440,14 @@ def rebrand_strings(tree):
           f'updated {changed} translation files')
 
 
-def copy_resources(tree):
+def copy_resources(tree, platform):
     mappings = []
-    for listing, prefixes in (
-            (HELIUM_REPO / 'resources' / 'helium_resources.txt', ('branding/', 'generated/')),
-            (ROOT / 'resources' / 'platform_resources.txt', ('assets/',))):
+    listings = [(HELIUM_REPO / 'resources' / 'helium_resources.txt', ('branding/', 'generated/'))]
+    if platform == 'macos':
+        listings.append(
+            (ROOT / 'macos' / 'resources' / 'platform_resources.txt', ('assets/',)))
+    # On Windows the app icon comes from windows/resources/generate_resources.txt.
+    for listing, prefixes in listings:
         for line in listing.read_text().splitlines():
             parts = line.split()
             if len(parts) == 2 and not line.startswith('#') and parts[0].startswith(prefixes):
@@ -432,15 +473,18 @@ def copy_resources(tree):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('tree', type=Path, help='the prepared Chromium source tree')
-    tree = parser.parse_args().tree.resolve()
+    parser.add_argument('--platform', choices=sorted(PLATFORM_CODE_EDITS), default='macos',
+                        help='the platform the tree is prepared for (default: macos)')
+    args = parser.parse_args()
+    tree = args.tree.resolve()
     if not (tree / 'OWNERS').exists():
         raise SystemExit(f'{tree} is not a Chromium source tree')
 
     try:
         apply_patches(tree)
-        apply_code_edits(tree)
+        apply_code_edits(tree, args.platform)
         rebrand_strings(tree)
-        copy_resources(tree)
+        copy_resources(tree, args.platform)
     except RebrandError as error:
         raise SystemExit(f'sail/rebrand.py: {error}') from None
     print('Sail branding applied')

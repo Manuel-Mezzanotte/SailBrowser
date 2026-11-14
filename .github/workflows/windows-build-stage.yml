@@ -1,0 +1,47 @@
+name: Windows build stage
+on:
+  workflow_call:
+    inputs:
+      arch:
+        required: true
+        type: string
+      runs-on:
+        required: true
+        type: string
+      from-artifact:
+        required: true
+        type: boolean
+    outputs:
+      finished:
+        value: ${{ jobs.build.outputs.finished }}
+      version:
+        value: ${{ jobs.build.outputs.version }}
+permissions:
+  contents: read
+  actions: write
+env:
+  HELIUM_BUILD_JOBS: ${{ vars.HELIUM_BUILD_JOBS }}
+jobs:
+  build:
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 360
+    outputs:
+      finished: ${{ steps.stage.outputs.finished }}
+      version: ${{ steps.package.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/windows-prepare
+      - uses: ./.github/actions/windows-stage
+        id: stage
+        with:
+          arm: ${{ inputs.arch == 'arm64' }}
+          from_artifact: ${{ inputs.from-artifact }}
+          package_here: true
+      - uses: ./.github/actions/windows-package
+        id: package
+        if: steps.stage.outputs.package_here == 'true'
+        with:
+          from_artifact: false
+          arch: ${{ inputs.arch }}

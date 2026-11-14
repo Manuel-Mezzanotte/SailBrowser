@@ -18,7 +18,7 @@ helium_resources() {
 
 # Sail: turns the prepared Helium tree into Sail (names, icons, sail://).
 sail_rebrand() {
-  python3 "$_root_dir/sail/rebrand.py" "$_src_dir"
+  python3 "$_repo_dir/sail/rebrand.py" "$_src_dir"
 }
 
 fetch_sources() {

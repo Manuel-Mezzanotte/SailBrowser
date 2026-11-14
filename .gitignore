@@ -6,4 +6,8 @@ build/
 
 .pc
 
-resources/generated/
+macos/resources/generated/
+
+# Windows (see windows/)
+windows/resources/generated/
+__pycache__/

@@ -11,7 +11,7 @@
 - **Updates.** Sail does not update itself and does not check for updates.
 - **Your data stays on your Mac.** History, bookmarks, passwords and settings are stored in `~/Library/Application Support/com.manuelmezzanotte.sail`. Saved passwords are encrypted with a key kept in the macOS keychain ("Sail Storage Key").
 
-Questions: [open an issue](https://github.com/Manuel-Mezzanotte/MioBrowser/issues/new).
+Questions: [open an issue](https://github.com/Manuel-Mezzanotte/SailBrowser/issues/new).
 
 ## Italiano
 
@@ -22,4 +22,4 @@ Questions: [open an issue](https://github.com/Manuel-Mezzanotte/MioBrowser/issue
 - **Aggiornamenti.** Sail non si aggiorna da solo e non controlla se ci sono aggiornamenti.
 - **I tuoi dati restano sul tuo Mac.** Cronologia, preferiti, password e impostazioni sono salvati in `~/Library/Application Support/com.manuelmezzanotte.sail`. Le password salvate sono cifrate con una chiave conservata nel portachiavi di macOS ("Sail Storage Key").
 
-Domande: [apri una segnalazione](https://github.com/Manuel-Mezzanotte/MioBrowser/issues/new).
+Domande: [apri una segnalazione](https://github.com/Manuel-Mezzanotte/SailBrowser/issues/new).

@@ -1,0 +1,46 @@
+name: Package Sail for Windows
+description: Finish the build, create the installer and upload the packages (unsigned)
+inputs:
+  from_artifact:
+    description: Restore the build tree from a previous job
+    default: true
+  arch:
+    description: Target architecture (x86_64 or arm64)
+    required: true
+outputs:
+  version:
+    description: Version of the packaged build
+    value: ${{ steps.upload.outputs.version }}
+runs:
+  using: composite
+  steps:
+    - name: Run stage
+      id: stage
+      uses: ./.github/actions/windows-stage
+      with:
+        arm: ${{ inputs.arch == 'arm64' }}
+        from_artifact: ${{ inputs.from_artifact }}
+        save_artifact: false
+
+    - name: Check the build completed
+      if: steps.stage.outputs.finished != 'true'
+      shell: pwsh
+      run: throw 'Build did not finish within the available stages'
+
+    # Unsigned: Windows SmartScreen warns on first launch ("More info" -> "Run anyway").
+    - name: Create the installer
+      shell: pwsh
+      working-directory: C:\sail
+      run: |
+        python windows\package.py --output-dir C:\sail\build\packages
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        Get-ChildItem C:\sail\build\packages
+
+    - name: Upload the packages
+      id: upload
+      uses: ./.github/actions/windows-stage
+      with:
+        upload_final: true
+        final_directory: C:\sail\build\packages
+        arm: ${{ inputs.arch == 'arm64' }}
+        from_artifact: false
