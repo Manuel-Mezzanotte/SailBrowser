@@ -1,6 +1,7 @@
 // One stage of the Windows build, adapted from helium-windows. The repository
-// is copied to C:\sail (see windows-prepare); the Chromium tree lives in
-// C:\sail\build\src and travels between stages as the artifact zip.
+// is copied to D:\sail (see windows-prepare, which sets SAIL_REPO); the
+// Chromium tree lives in D:\sail\build\src and travels between stages as the
+// artifact zip.
 const core = require('@actions/core');
 const io = require('@actions/io');
 const exec = require('@actions/exec');
@@ -10,7 +11,7 @@ const glob = require('@actions/glob');
 const path = require('path');
 const os = require('os');
 
-const REPO = 'C:\\sail';
+const REPO = process.env.SAIL_REPO || 'D:\\sail';
 const BUILD = path.join(REPO, 'build');
 
 async function uploadWithRetries(artifact, name, files, root, options) {

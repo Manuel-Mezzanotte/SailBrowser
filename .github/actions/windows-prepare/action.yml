@@ -1,5 +1,5 @@
 name: Prepare the Windows build environment
-description: Set up Python, the Windows SDK, the build folder C:\sail and the stage action
+description: Set up Python, the Windows SDK, the build folder D:\sail and the stage action
 runs:
   using: composite
   steps:
@@ -17,9 +17,18 @@ runs:
         Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2370315' -OutFile "$env:RUNNER_TEMP\winsdksetup.exe"
         $installer = Start-Process "$env:RUNNER_TEMP\winsdksetup.exe" -ArgumentList '/quiet', '/norestart', '/features', '+' -Wait -PassThru
         if ($installer.ExitCode -notin @(0, 3010)) { throw "Windows SDK installation failed: $($installer.ExitCode)" }
-    - name: Copy the repository to C:\sail
+    # C: has only about 30 GB free on GitHub's Windows runners, D: about 150 GB.
+    # Chromium needs far more than 30 GB, so everything goes on D:, temporary
+    # files included.
+    - name: Copy the repository to D:\sail
       shell: pwsh
-      run: Copy-Item -Path . -Destination "C:\sail" -Recurse
+      run: |
+        Copy-Item -Path . -Destination "D:\sail" -Recurse
+        New-Item -ItemType Directory -Force -Path "D:\tmp" | Out-Null
+        "SAIL_REPO=D:\sail" >> $env:GITHUB_ENV
+        "TEMP=D:\tmp" >> $env:GITHUB_ENV
+        "TMP=D:\tmp" >> $env:GITHUB_ENV
+        Get-PSDrive C, D | Format-Table Name, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
     - name: Install Python packages
       shell: pwsh
       run: python -m pip install requests Pillow

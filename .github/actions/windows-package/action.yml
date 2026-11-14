@@ -30,17 +30,17 @@ runs:
     # Unsigned: Windows SmartScreen warns on first launch ("More info" -> "Run anyway").
     - name: Create the installer
       shell: pwsh
-      working-directory: C:\sail
+      working-directory: ${{ env.SAIL_REPO }}
       run: |
-        python windows\package.py --output-dir C:\sail\build\packages
+        python windows\package.py --output-dir "$env:SAIL_REPO\build\packages"
         if ($LASTEXITCODE) { exit $LASTEXITCODE }
-        Get-ChildItem C:\sail\build\packages
+        Get-ChildItem "$env:SAIL_REPO\build\packages"
 
     - name: Upload the packages
       id: upload
       uses: ./.github/actions/windows-stage
       with:
         upload_final: true
-        final_directory: C:\sail\build\packages
+        final_directory: ${{ env.SAIL_REPO }}\build\packages
         arm: ${{ inputs.arch == 'arm64' }}
         from_artifact: false
